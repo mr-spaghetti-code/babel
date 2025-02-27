@@ -134,7 +134,11 @@ const doorColor = 0x4169E1; // Royal blue for doors
 // Where (0,0) is the center room
 const rooms = new Map();
 const currentRoom = { q: 0, r: 0 };
-let maxRing = 5; // Increased from 2 to allow for more rooms
+let maxRing = 5; // Maximum ring number for exploration
+
+// Track visited rooms and their door placements
+const visitedRooms = new Map();
+// Format: Map<"q,r", { doors: [wallIndex1, wallIndex2], neighbors: Map<wallIndex, {q,r}> }>
 
 // Single room reference - we'll only have one physical room
 let singleRoom = null;
@@ -208,7 +212,7 @@ function calculateRing(q, r) {
 
 // Function to convert wall number to direction in axial coordinates
 function wallToDirection(wallNumber) {
-    // Direction mapping based on wall numbers (using the convention from the spiral algorithm)
+    // Direction mapping based on wall numbers
     // Wall 0: East, Wall 1: Southeast, Wall 2: Southwest,
     // Wall 3: West, Wall 4: Northwest, Wall 5: Northeast
     const directions = [
@@ -222,6 +226,25 @@ function wallToDirection(wallNumber) {
     return directions[wallNumber];
 }
 
+// Function to get direction from coordinates
+function directionToWall(dirQ, dirR) {
+    const directions = [
+        {q: 1, r: 0},    // Wall 0 - East
+        {q: 1, r: -1},   // Wall 1 - Southeast  
+        {q: 0, r: -1},   // Wall 2 - Southwest
+        {q: -1, r: 0},   // Wall 3 - West
+        {q: -1, r: 1},   // Wall 4 - Northwest
+        {q: 0, r: 1}     // Wall 5 - Northeast
+    ];
+    
+    for (let i = 0; i < directions.length; i++) {
+        if (directions[i].q === dirQ && directions[i].r === dirR) {
+            return i;
+        }
+    }
+    return -1; // Not found
+}
+
 // Function to find the opposite wall number
 function getOppositeWall(wallNumber) {
     return (wallNumber + 3) % 6;
@@ -229,88 +252,230 @@ function getOppositeWall(wallNumber) {
 
 // Function to determine which walls should have doors in a room
 function determineDoorsForRoom(q, r) {
-    const ring = calculateRing(q, r);
+    // Get visited room info if it exists
+    const roomKey = `${q},${r}`;
     
-    // Center room special case
-    if (ring === 0) {
-        return [0, 3]; // East and West doors for better consistency
-    }
-    
-    // Direction vectors for the six walls
-    const directions = [
-        {q: 1, r: 0},    // 0: East
-        {q: 1, r: -1},   // 1: Southeast
-        {q: 0, r: -1},   // 2: Southwest
-        {q: -1, r: 0},   // 3: West
-        {q: -1, r: 1},   // 4: Northwest
-        {q: 0, r: 1}     // 5: Northeast
-    ];
-    
-    // Every room needs exactly two doors
-    const doors = [];
-    
-    // Check each possible neighboring cell
-    const neighbors = [];
-    for (let i = 0; i < 6; i++) {
-        const direction = directions[i];
-        const neighborQ = q + direction.q;
-        const neighborR = r + direction.r;
-        const neighborRing = calculateRing(neighborQ, neighborR);
+    if (visitedRooms.has(roomKey)) {
+        const roomData = visitedRooms.get(roomKey);
+        // If room already has two doors, return them
+        if (roomData.doors.length === 2) {
+            return roomData.doors;
+        }
         
-        if (neighborRing <= maxRing) {
-            neighbors.push({
-                wallIndex: i,
-                q: neighborQ, 
-                r: neighborR,
-                ring: neighborRing
-            });
-        }
-    }
-    
-    // If this is the outermost ring, we want exactly one door (to inner ring)
-    if (ring === maxRing) {
-        // Find the neighbor with the lowest ring number (closest to center)
-        neighbors.sort((a, b) => a.ring - b.ring);
-        if (neighbors.length > 0) {
-            doors.push(neighbors[0].wallIndex);
-        }
-        return doors;
-    }
-    
-    // For all other rooms, pick two doors on opposite sides
-    if (doors.length < 2) {
-        // First try to place doors on opposite walls (0-3, 1-4, 2-5)
-        // This provides a consistent east-west passage through most rooms
-        if (!doors.includes(0) && !doors.includes(3)) {
-            doors.push(0); // East
-            doors.push(3); // West
-        } else if (!doors.includes(1) && !doors.includes(4)) {
-            doors.push(1); // Southeast
-            doors.push(4); // Northwest
-        } else if (!doors.includes(2) && !doors.includes(5)) {
-            doors.push(2); // Southwest
-            doors.push(5); // Northeast
-        } else {
-            // If we can't place doors on opposite walls, place them 2 walls apart
-            if (!doors.includes(0) && !doors.includes(2)) {
-                doors.push(0);
-                doors.push(2);
-            } else if (!doors.includes(1) && !doors.includes(3)) {
-                doors.push(1);
-                doors.push(3);
-            } else if (!doors.includes(2) && !doors.includes(4)) {
-                doors.push(2);
-                doors.push(4);
-            } else if (!doors.includes(3) && !doors.includes(5)) {
-                doors.push(3);
-                doors.push(5);
-            } else if (!doors.includes(4) && !doors.includes(0)) {
-                doors.push(4);
-                doors.push(0);
-            } else if (!doors.includes(5) && !doors.includes(1)) {
-                doors.push(5);
-                doors.push(1);
+        // If room has only one door (during initial transition setup),
+        // we need to determine the second door
+        if (roomData.doors.length === 1) {
+            const doors = [...roomData.doors]; // Copy existing door
+            const neighbors = new Map(roomData.neighbors); // Copy existing neighbors
+            
+            // Now place a second door (randomly, but with constraints)
+            const availableWalls = [0, 1, 2, 3, 4, 5].filter(w => !doors.includes(w));
+            
+            // Try placing on each available wall, checking constraints
+            const validWalls = [];
+            for (const wallIndex of availableWalls) {
+                const directionToNeighbor = wallToDirection(wallIndex);
+                const neighborQ = q + directionToNeighbor.q;
+                const neighborR = r + directionToNeighbor.r;
+                const neighborKey = `${neighborQ},${neighborR}`;
+                
+                // Check if the neighbor already exists and has two doors
+                if (visitedRooms.has(neighborKey)) {
+                    const neighborDoors = visitedRooms.get(neighborKey).doors;
+                    // Skip if neighbor already has two doors
+                    if (neighborDoors.length >= 2) continue;
+                    
+                    // Skip if the opposite wall in the neighbor already has a door
+                    const oppositeWall = getOppositeWall(wallIndex);
+                    if (neighborDoors.includes(oppositeWall)) continue;
+                }
+                
+                // This wall is valid for a door
+                validWalls.push(wallIndex);
             }
+            
+            // Choose a random valid wall for the second door
+            if (validWalls.length > 0) {
+                const randomIndex = Math.floor(Math.random() * validWalls.length);
+                const chosenWall = validWalls[randomIndex];
+                doors.push(chosenWall);
+                
+                // Record the connection to the neighbor
+                const directionToNeighbor = wallToDirection(chosenWall);
+                const neighborQ = q + directionToNeighbor.q;
+                const neighborR = r + directionToNeighbor.r;
+                neighbors.set(chosenWall, { q: neighborQ, r: neighborR });
+            } else {
+                // If no valid walls, place a door on a wall that doesn't lead to a visited room
+                for (const wallIndex of availableWalls) {
+                    const directionToNeighbor = wallToDirection(wallIndex);
+                    const neighborQ = q + directionToNeighbor.q;
+                    const neighborR = r + directionToNeighbor.r;
+                    const neighborKey = `${neighborQ},${neighborR}`;
+                    
+                    if (!visitedRooms.has(neighborKey)) {
+                        doors.push(wallIndex);
+                        neighbors.set(wallIndex, { q: neighborQ, r: neighborR });
+                        break;
+                    }
+                }
+            }
+            
+            // If we still don't have a second door, just place it on the first available wall
+            if (doors.length < 2 && availableWalls.length > 0) {
+                const wallIndex = availableWalls[0];
+                doors.push(wallIndex);
+                
+                // Record the connection to the neighbor
+                const directionToNeighbor = wallToDirection(wallIndex);
+                const neighborQ = q + directionToNeighbor.q;
+                const neighborR = r + directionToNeighbor.r;
+                neighbors.set(wallIndex, { q: neighborQ, r: neighborR });
+            }
+            
+            // Update the room's door configuration
+            roomData.doors = doors;
+            roomData.neighbors = neighbors;
+            
+            // Validate that we have exactly 2 doors
+            if (doors.length !== 2) {
+                console.error("Failed to place exactly 2 doors for room", q, r, doors);
+            }
+            
+            return doors;
+        }
+    }
+    
+    // This is a completely new room we're generating
+    const doors = [];
+    const neighbors = new Map();
+    
+    // Check if we're coming from an adjacent room - if so, we must have a door on the opposite wall
+    // Iterate through all previously visited rooms
+    for (const [visitedRoomKey, visitedRoomData] of visitedRooms.entries()) {
+        const [visitedQ, visitedR] = visitedRoomKey.split(',').map(Number);
+        
+        // Check if this visited room is adjacent to our current room
+        const deltaQ = q - visitedQ;
+        const deltaR = r - visitedR;
+        
+        // If adjacent (difference corresponds to one of our direction vectors)
+        const adjacentWallIndex = directionToWall(deltaQ, deltaR);
+        if (adjacentWallIndex !== -1) {
+            // Check if the visited room has a door pointing to this room
+            for (const [doorWall, neighbor] of visitedRoomData.neighbors.entries()) {
+                if (neighbor.q === q && neighbor.r === r) {
+                    // This visited room has a door to our current room
+                    // We must place a door on the opposite wall
+                    const oppositeWall = getOppositeWall(doorWall);
+                    doors.push(oppositeWall);
+                    neighbors.set(oppositeWall, { q: visitedQ, r: visitedR });
+                    break;
+                }
+            }
+        }
+    }
+    
+    // If no door placed yet (this is the first room), place first door
+    if (doors.length === 0) {
+        // First room gets default doors on east and west (0 and 3)
+        doors.push(0); // East
+        
+        // Calculate the neighbor coordinates
+        const eastNeighborQ = q + wallToDirection(0).q;
+        const eastNeighborR = r + wallToDirection(0).r;
+        
+        // Add to neighbors map
+        neighbors.set(0, { q: eastNeighborQ, r: eastNeighborR });
+    }
+    
+    // Now place a second door (randomly, but with constraints)
+    const availableWalls = [0, 1, 2, 3, 4, 5].filter(w => !doors.includes(w));
+    
+    // Try placing on each available wall, checking constraints
+    const validWalls = [];
+    for (const wallIndex of availableWalls) {
+        const directionToNeighbor = wallToDirection(wallIndex);
+        const neighborQ = q + directionToNeighbor.q;
+        const neighborR = r + directionToNeighbor.r;
+        const neighborKey = `${neighborQ},${neighborR}`;
+        
+        // Check if the neighbor already exists and has two doors
+        if (visitedRooms.has(neighborKey)) {
+            const neighborDoors = visitedRooms.get(neighborKey).doors;
+            // Skip if neighbor already has two doors
+            if (neighborDoors.length >= 2) continue;
+            
+            // Skip if the opposite wall in the neighbor already has a door
+            const oppositeWall = getOppositeWall(wallIndex);
+            if (neighborDoors.includes(oppositeWall)) continue;
+        }
+        
+        // This wall is valid for a door
+        validWalls.push(wallIndex);
+    }
+    
+    // Choose a random valid wall for the second door
+    if (validWalls.length > 0) {
+        const randomIndex = Math.floor(Math.random() * validWalls.length);
+        const chosenWall = validWalls[randomIndex];
+        doors.push(chosenWall);
+        
+        // Record the connection to the neighbor
+        const directionToNeighbor = wallToDirection(chosenWall);
+        const neighborQ = q + directionToNeighbor.q;
+        const neighborR = r + directionToNeighbor.r;
+        neighbors.set(chosenWall, { q: neighborQ, r: neighborR });
+    } else {
+        // If no valid walls, place a door on a wall that doesn't lead to a visited room
+        let doorPlaced = false;
+        for (const wallIndex of availableWalls) {
+            const directionToNeighbor = wallToDirection(wallIndex);
+            const neighborQ = q + directionToNeighbor.q;
+            const neighborR = r + directionToNeighbor.r;
+            const neighborKey = `${neighborQ},${neighborR}`;
+            
+            if (!visitedRooms.has(neighborKey)) {
+                doors.push(wallIndex);
+                neighbors.set(wallIndex, { q: neighborQ, r: neighborR });
+                doorPlaced = true;
+                break;
+            }
+        }
+        
+        // If still no door placed, pick any available wall
+        if (!doorPlaced && availableWalls.length > 0) {
+            const wallIndex = availableWalls[0];
+            doors.push(wallIndex);
+            
+            // Record the connection to the neighbor
+            const directionToNeighbor = wallToDirection(wallIndex);
+            const neighborQ = q + directionToNeighbor.q;
+            const neighborR = r + directionToNeighbor.r;
+            neighbors.set(wallIndex, { q: neighborQ, r: neighborR });
+        }
+    }
+    
+    // Save this room's door configuration
+    visitedRooms.set(roomKey, { doors, neighbors });
+    
+    // Validate that we have exactly 2 doors
+    if (doors.length !== 2) {
+        console.error("Failed to place exactly 2 doors for room", q, r, doors);
+        
+        // Force a second door if we somehow don't have one
+        if (doors.length < 2 && availableWalls.length > 0) {
+            const wallIndex = availableWalls[0];
+            doors.push(wallIndex);
+            
+            // Record the connection
+            const directionToNeighbor = wallToDirection(wallIndex);
+            const neighborQ = q + directionToNeighbor.q;
+            const neighborR = r + directionToNeighbor.r;
+            neighbors.set(wallIndex, { q: neighborQ, r: neighborR });
+            
+            // Update the room data
+            visitedRooms.set(roomKey, { doors, neighbors });
         }
     }
     
@@ -373,11 +538,84 @@ function createDoor(wallIndex, doorWidth, doorHeight) {
     return doorGroup;
 }
 
+// Function to validate door connections before creating them
+function validateDoorConnection(roomQ, roomR, wallIndex) {
+    // Get direction to the next room
+    const dir = wallToDirection(wallIndex);
+    
+    // Calculate target room coordinates
+    const targetQ = roomQ + dir.q;
+    const targetR = roomR + dir.r;
+    
+    // Get opposite wall index
+    const oppositeWall = getOppositeWall(wallIndex);
+    
+    // Check if target room exists in our data structure
+    const targetRoomKey = `${targetQ},${targetR}`;
+    if (visitedRooms.has(targetRoomKey)) {
+        // Target room exists, verify it has a door on the opposite wall
+        const targetRoom = visitedRooms.get(targetRoomKey);
+        
+        // Check if target room has a door on the opposite wall
+        if (!targetRoom.doors.includes(oppositeWall)) {
+            console.warn(`Room (${targetQ},${targetR}) doesn't have a door on wall ${oppositeWall} (opposite to wall ${wallIndex} of room (${roomQ},${roomR}))`);
+            
+            // Fix the target room by adding or replacing a door
+            if (targetRoom.doors.length < 2) {
+                console.log(`Adding door to wall ${oppositeWall} in target room (${targetQ},${targetR})`);
+                targetRoom.doors.push(oppositeWall);
+                targetRoom.neighbors.set(oppositeWall, { q: roomQ, r: roomR });
+            } else {
+                console.log(`Replacing a door in target room (${targetQ},${targetR}) to create door on wall ${oppositeWall}`);
+                
+                // Find a door to replace (one that doesn't connect back to our room)
+                const doorToReplace = targetRoom.doors.find(door => 
+                    door !== oppositeWall && 
+                    (!targetRoom.neighbors.has(door) || 
+                     targetRoom.neighbors.get(door).q !== roomQ || 
+                     targetRoom.neighbors.get(door).r !== roomR)
+                );
+                
+                if (doorToReplace !== undefined) {
+                    const idx = targetRoom.doors.indexOf(doorToReplace);
+                    targetRoom.doors[idx] = oppositeWall;
+                    targetRoom.neighbors.set(oppositeWall, { q: roomQ, r: roomR });
+                } else {
+                    console.error(`Could not find a door to replace in target room (${targetQ},${targetR})`);
+                }
+            }
+        } else {
+            // Door exists, verify it points back to our room
+            const hasCorrectNeighbor = 
+                targetRoom.neighbors.has(oppositeWall) && 
+                targetRoom.neighbors.get(oppositeWall).q === roomQ && 
+                targetRoom.neighbors.get(oppositeWall).r === roomR;
+            
+            if (!hasCorrectNeighbor) {
+                console.warn(`Door on wall ${oppositeWall} in room (${targetQ},${targetR}) doesn't point back to room (${roomQ},${roomR})`);
+                
+                // Fix the neighbor connection
+                targetRoom.neighbors.set(oppositeWall, { q: roomQ, r: roomR });
+            }
+        }
+    }
+    
+    return { targetQ, targetR, oppositeWall };
+}
+
 // Function to create a hexagonal room with doors
 function createHexagonalRoom(q, r) {
     const room = new THREE.Group();
     room.userData = { q: q, r: r, type: 'room' };
     
+    // Ensure this room has exactly 2 doors before creating
+    const roomKey = `${q},${r}`;
+    const roomData = visitedRooms.get(roomKey);
+    if (!roomData || roomData.doors.length !== 2) {
+        console.warn(`Room ${roomKey} has invalid door configuration, fixing...`);
+        determineDoorsForRoom(q, r);
+    }
+
     // Calculate vertices for the hexagon
     const hexPoints = [];
     for (let i = 0; i < 6; i++) {
@@ -418,7 +656,7 @@ function createHexagonalRoom(q, r) {
     portalPlane.name = "portalEffect";
     room.add(portalPlane);
     
-    // Wall labels - change naming convention to match the spiral algorithm
+    // Wall labels - change naming convention to match the room navigation
     const wallLabels = ['WALL 0', 'WALL 1', 'WALL 2', 'WALL 3', 'WALL 4', 'WALL 5'];
     
     // Create a canvas for each label
@@ -514,12 +752,12 @@ function createHexagonalRoom(q, r) {
             const door = createDoor(index, doorWidth, doorHeight);
             door.name = `door${index}`;
             
-            // Get direction to the next room
-            const dir = wallToDirection(index);
+            // Validate connection before setting door target
+            const { targetQ, targetR } = validateDoorConnection(q, r, index);
             
             // Set door's target room coordinates
-            door.userData.targetQ = q + dir.q;
-            door.userData.targetR = r + dir.r;
+            door.userData.targetQ = targetQ;
+            door.userData.targetR = targetR;
             
             // Position door in the center of the wall
             const wallCenter = calculateWallCenter(points[0], points[1], points[2], points[3]);
@@ -738,52 +976,11 @@ function calculateRoomPosition(q, r) {
     return { x, y: 0, z };
 }
 
-// Function to create rooms up to a certain ring number
+// Function to create rooms up to a certain ring number - REMOVED
+// Now we only create rooms as the player explores
 function createRooms(maxRing) {
-    // Create center room first
+    // We now only create the center room initially
     createAndAddRoom(0, 0);
-    
-    // Direction vectors for the six walls
-    const directions = [
-        {q: 1, r: 0},    // 0: East
-        {q: 1, r: -1},   // 1: Southeast
-        {q: 0, r: -1},   // 2: Southwest
-        {q: -1, r: 0},   // 3: West
-        {q: -1, r: 1},   // 4: Northwest
-        {q: 0, r: 1}     // 5: Northeast
-    ];
-    
-    // Start at the center
-    let q = 0;
-    let r = 0;
-    
-    // For each ring
-    for (let ring = 1; ring <= maxRing; ring++) {
-        // Move to the first room in this ring (0,ring)
-        q = 0;
-        r = ring;
-        
-        // Create the first room of the ring
-        createAndAddRoom(q, r);
-        
-        // Follow the ring edges in order
-        for (let edge = 0; edge < 6; edge++) {
-            const dirIndex = edge; // Direction to move along this edge
-            
-            // Move 'ring' steps along this edge
-            for (let i = 0; i < ring; i++) {
-                // Skip the first step on the first edge because we already created that room
-                if (!(edge === 0 && i === 0)) {
-                    // Move to the next position
-                    q += directions[dirIndex].q;
-                    r += directions[dirIndex].r;
-                    
-                    // Create room at this position
-                    createAndAddRoom(q, r);
-                }
-            }
-        }
-    }
 }
 
 // Function to create a room and add it to the scene
@@ -811,6 +1008,19 @@ function createAndAddRoom(q, r) {
 
 // Function to create a single hexagonal room and add it to the scene
 function createSingleRoom() {
+    // Initialize the visited rooms data structure for the first room if needed
+    const roomKey = `${currentRoom.q},${currentRoom.r}`;
+    if (!visitedRooms.has(roomKey)) {
+        determineDoorsForRoom(currentRoom.q, currentRoom.r);
+    } else {
+        // Make sure the room has exactly 2 doors
+        const roomData = visitedRooms.get(roomKey);
+        if (roomData.doors.length !== 2) {
+            console.log(`Fixing room ${roomKey} door count: ${roomData.doors.length}`);
+            determineDoorsForRoom(currentRoom.q, currentRoom.r);
+        }
+    }
+    
     singleRoom = createHexagonalRoom(currentRoom.q, currentRoom.r);
     scene.add(singleRoom);
 }
@@ -832,6 +1042,19 @@ function recreateSingleRoom() {
 
 // Function to update the single room to represent coordinates (q,r)
 function updateRoomAppearance(q, r) {
+    // Ensure this room has exactly 2 doors before recreating
+    const roomKey = `${q},${r}`;
+    if (visitedRooms.has(roomKey)) {
+        const roomData = visitedRooms.get(roomKey);
+        if (roomData.doors.length !== 2) {
+            console.log(`Fixing room ${roomKey} with ${roomData.doors.length} doors before recreating`);
+            determineDoorsForRoom(q, r);
+        }
+    } else {
+        // Room should always exist at this point but just in case
+        determineDoorsForRoom(q, r);
+    }
+
     // Completely recreate the room to ensure all doors are properly created
     recreateSingleRoom();
     
@@ -871,10 +1094,6 @@ function startPortalTransition(doorWallIndex, targetQ, targetR) {
     doorTransitionHistory.lastExitWall = doorWallIndex;
     
     // Compute the opposite wall (entry wall in the target room)
-    // This is the wall opposite to the exit wall (doorWallIndex)
-    // Wall 0 (East) is opposite to Wall 3 (West)
-    // Wall 1 (Southeast) is opposite to Wall 4 (Northwest)
-    // Wall 2 (Southwest) is opposite to Wall 5 (Northeast)
     const entryWall = getOppositeWall(doorWallIndex);
     doorTransitionHistory.lastEntryWall = entryWall;
     
@@ -893,6 +1112,79 @@ function startPortalTransition(doorWallIndex, targetQ, targetR) {
     if (portalPlane) {
         portalPlane.visible = true;
         portalPlane.material.opacity = 0;
+    }
+    
+    // Update visited rooms data structure - ensure the neighbor connection
+    const currentRoomKey = `${currentRoom.q},${currentRoom.r}`;
+    const targetRoomKey = `${targetQ},${targetR}`;
+    
+    // Make sure current room is in visitedRooms
+    if (!visitedRooms.has(currentRoomKey)) {
+        const doors = determineDoorsForRoom(currentRoom.q, currentRoom.r);
+        visitedRooms.set(currentRoomKey, { 
+            doors, 
+            neighbors: new Map()
+        });
+    }
+    
+    // Update current room's neighbor map
+    const currentRoomData = visitedRooms.get(currentRoomKey);
+    currentRoomData.neighbors.set(doorWallIndex, { q: targetQ, r: targetR });
+    
+    // Create entry in target room if needed
+    if (!visitedRooms.has(targetRoomKey)) {
+        // The room doesn't exist yet, so we'll need to ensure it has a door back to us
+        const doorToPlaceFirst = entryWall; // The entry wall must have a door back to us
+        
+        // Create the room data with at least this one door
+        const targetRoomNeighbors = new Map();
+        targetRoomNeighbors.set(doorToPlaceFirst, { q: currentRoom.q, r: currentRoom.r });
+        
+        // We need to pre-register this room with at least the door back to our current room
+        visitedRooms.set(targetRoomKey, {
+            doors: [doorToPlaceFirst], // Start with just one door
+            neighbors: targetRoomNeighbors
+        });
+        
+        // Immediately determine the second door by calling determineDoorsForRoom
+        // This will find the second door and update the room data
+        determineDoorsForRoom(targetQ, targetR);
+        
+        // Verify we now have exactly 2 doors
+        const updatedTargetRoom = visitedRooms.get(targetRoomKey);
+        if (updatedTargetRoom.doors.length !== 2) {
+            console.error(`Target room ${targetRoomKey} doesn't have exactly 2 doors after initialization`);
+        }
+    } else {
+        // The room exists, make sure it has a door back to our current room
+        const targetRoomData = visitedRooms.get(targetRoomKey);
+        if (!targetRoomData.doors.includes(entryWall)) {
+            // This should not happen if our logic is correct, but just in case
+            console.warn(`Target room ${targetRoomKey} doesn't have a door on wall ${entryWall} back to ${currentRoomKey}`);
+            
+            // Add the door and connection if it doesn't exist
+            if (targetRoomData.doors.length < 2) {
+                targetRoomData.doors.push(entryWall);
+                targetRoomData.neighbors.set(entryWall, { q: currentRoom.q, r: currentRoom.r });
+            } else {
+                console.error(`Cannot add door to room ${targetRoomKey} as it already has 2 doors`);
+                
+                // Force the correct door configuration by replacing one of the doors
+                // This is a last resort to maintain consistency
+                targetRoomData.doors[1] = entryWall; // Replace the second door
+                targetRoomData.neighbors.set(entryWall, { q: currentRoom.q, r: currentRoom.r });
+            }
+        }
+        
+        // Verify we have exactly 2 doors
+        if (targetRoomData.doors.length !== 2) {
+            console.error(`Target room ${targetRoomKey} doesn't have exactly 2 doors`);
+            
+            // Add a second door if needed
+            if (targetRoomData.doors.length < 2) {
+                determineDoorsForRoom(targetQ, targetR);
+            }
+        }
     }
 }
 
@@ -977,28 +1269,19 @@ function positionPlayerAtEntryWall(wallIndex) {
     camera.position.x = x;
     camera.position.z = z;
     
-    // Point toward the center of the room
-    const playerPos = new THREE.Vector3(x, camera.position.y, z);
-    const dirToCenter = new THREE.Vector3().subVectors(roomCenter, playerPos).normalize();
-    
-    // Calculate the angle to face the center (in the XZ plane)
-    const facingAngle = Math.atan2(-dirToCenter.x, -dirToCenter.z);
-    
-    // Reset camera's rotation completely
-    camera.rotation.set(0, 0, 0);
-    
-    // Apply the new facing angle
-    camera.rotation.y = facingAngle;
+    // Always point toward the center of the room
+    camera.lookAt(new THREE.Vector3(0, camera.position.y, 0));
     
     // Update controls to match camera rotation
     controls.getObject().position.copy(camera.position);
+    const facingAngle = Math.atan2(-dirFromWallToCenter.x, -dirFromWallToCenter.z);
     controls.getObject().rotation.y = facingAngle;
     
     // Update transition history
     doorTransitionHistory.cameraRotation = facingAngle;
     doorTransitionHistory.lastEntryWall = wallIndex;
     
-    console.log(`Positioned in front of door at wall ${wallIndex}, at exact wall center: (${wallCenter.x.toFixed(2)}, ${wallCenter.z.toFixed(2)})`);
+    console.log(`Positioned in front of door at wall ${wallIndex}`);
 }
 
 // Create the single room
@@ -1078,7 +1361,7 @@ function animate() {
                     const targetRing = calculateRing(targetQ, targetR);
                     const currentRing = calculateRing(currentRoom.q, currentRoom.r);
                     
-                    // Log ring transition info for spiral navigation
+                    // Log ring transition info for navigation
                     if (targetRing !== currentRing) {
                         console.log(`Moving from ring ${currentRing} to ring ${targetRing}`);
                     }
@@ -1258,10 +1541,10 @@ function createRoomIndicator() {
     mapButton.style.zIndex = '1000';
     document.body.appendChild(mapButton);
     
-    // Add a help text for spiral navigation
+    // Add a help text for exploration
     const helpText = document.createElement('div');
     helpText.id = 'help-text';
-    helpText.textContent = 'Follow the spiral pattern to explore all rooms';
+    helpText.textContent = 'Explore the hexagonal rooms - each has exactly two doors';
     helpText.style.position = 'fixed';
     helpText.style.bottom = '20px';
     helpText.style.left = '50%';
@@ -1316,7 +1599,7 @@ function createRoomIndicator() {
     updateRoomIndicator(currentRoom.q, currentRoom.r);
 }
 
-// Function to draw a simple hexagonal map
+// Function to draw a simple hexagonal map showing visited rooms
 function drawMap() {
     const canvas = document.getElementById('map-canvas');
     const ctx = canvas.getContext('2d');
@@ -1334,37 +1617,152 @@ function drawMap() {
         return { x, y };
     }
     
-    // Draw hexagons for all rooms up to maxRing
-    for (let ringNum = 0; ringNum <= maxRing; ringNum++) {
-        if (ringNum === 0) {
-            // Center hexagon
-            const centerPos = axialToPixel(0, 0);
-            drawHexagon(ctx, centerPos.x, centerPos.y, hexSize, (0 === currentRoom.q && 0 === currentRoom.r));
-        } else {
-            // Start at the top-right corner of the ring
-            let q = 0;
-            let r = ringNum;
+    // Verify and fix door connections before drawing
+    // This ensures neighboring rooms have properly matching doors
+    function verifyDoorConnections() {
+        let fixedConnections = 0;
+        
+        // Check all visited rooms
+        for (const [roomKey, roomData] of visitedRooms.entries()) {
+            const [q, r] = roomKey.split(',').map(Number);
             
-            // For each of the 6 sides of the ring
-            for (let side = 0; side < 6; side++) {
-                // For each step along the side
-                for (let step = 0; step < ringNum; step++) {
-                    // Draw hexagon at current coordinates
-                    const pos = axialToPixel(q, r);
-                    drawHexagon(ctx, pos.x, pos.y, hexSize, (q === currentRoom.q && r === currentRoom.r));
+            // Check each door's connection
+            for (const [wallIndex, neighbor] of roomData.neighbors.entries()) {
+                const neighborKey = `${neighbor.q},${neighbor.r}`;
+                
+                // If neighbor exists, check if it has a corresponding door back
+                if (visitedRooms.has(neighborKey)) {
+                    const neighborRoom = visitedRooms.get(neighborKey);
+                    const oppositeWall = getOppositeWall(wallIndex);
                     
-                    // Move to next position along the ring
-                    switch (side) {
-                        case 0: q++; r--; break; // Move southeast
-                        case 1: q++; break;      // Move east
-                        case 2: r--; break;      // Move southwest
-                        case 3: q--; break;      // Move west
-                        case 4: q--; r++; break; // Move northwest
-                        case 5: r++; break;      // Move northeast
+                    // Check if neighbor has a door back to this room
+                    let hasMatchingDoor = false;
+                    for (const [neighborWall, neighborTarget] of neighborRoom.neighbors.entries()) {
+                        if (neighborWall === oppositeWall && 
+                            neighborTarget.q === q && 
+                            neighborTarget.r === r) {
+                            hasMatchingDoor = true;
+                            break;
+                        }
+                    }
+                    
+                    // If no matching door, add one
+                    if (!hasMatchingDoor) {
+                        console.log(`Fixing door connection: Room ${neighborKey} missing door to ${roomKey}`);
+                        
+                        // Add the corresponding door in the neighbor room
+                        if (neighborRoom.doors.includes(oppositeWall)) {
+                            // The wall exists as a door but points to wrong room
+                            neighborRoom.neighbors.set(oppositeWall, {q: q, r: r});
+                        } else if (neighborRoom.doors.length < 2) {
+                            // Add a new door
+                            neighborRoom.doors.push(oppositeWall);
+                            neighborRoom.neighbors.set(oppositeWall, {q: q, r: r});
+                        } else {
+                            // Replace a door if necessary
+                            // Find a door that doesn't point to this room
+                            const doorToReplace = neighborRoom.doors.find(door => 
+                                !neighborRoom.neighbors.has(door) || 
+                                (neighborRoom.neighbors.get(door).q !== q || 
+                                 neighborRoom.neighbors.get(door).r !== r)
+                            );
+                            
+                            if (doorToReplace !== undefined && doorToReplace !== getOppositeWall(wallIndex)) {
+                                // Replace the door
+                                const idx = neighborRoom.doors.indexOf(doorToReplace);
+                                neighborRoom.doors[idx] = oppositeWall;
+                                neighborRoom.neighbors.set(oppositeWall, {q: q, r: r});
+                            }
+                        }
+                        
+                        fixedConnections++;
                     }
                 }
             }
+            
+            // Ensure the room has exactly 2 doors
+            if (roomData.doors.length !== 2) {
+                console.log(`Room ${roomKey} has ${roomData.doors.length} doors, fixing...`);
+                determineDoorsForRoom(q, r);
+                fixedConnections++;
+            }
         }
+        
+        if (fixedConnections > 0) {
+            console.log(`Fixed ${fixedConnections} door connections`);
+        }
+        
+        return fixedConnections;
+    }
+    
+    // Verify door connections until everything is correct
+    // Limit to 3 iterations to prevent infinite loops
+    for (let i = 0; i < 3; i++) {
+        const fixedCount = verifyDoorConnections();
+        if (fixedCount === 0) break;
+    }
+    
+    // First draw connections between rooms
+    ctx.strokeStyle = 'rgba(150, 150, 150, 0.5)';
+    ctx.lineWidth = 1;
+    
+    // Draw all connections first (behind rooms)
+    for (const [roomKey, roomData] of visitedRooms.entries()) {
+        const [q, r] = roomKey.split(',').map(Number);
+        const pos = axialToPixel(q, r);
+        
+        // Draw connections to neighbors
+        for (const [wallIndex, neighbor] of roomData.neighbors.entries()) {
+            const neighborPos = axialToPixel(neighbor.q, neighbor.r);
+            
+            // Draw a line from room center to neighbor center
+            ctx.beginPath();
+            ctx.moveTo(pos.x, pos.y);
+            ctx.lineTo(neighborPos.x, neighborPos.y);
+            ctx.stroke();
+        }
+    }
+    
+    // Draw all visited rooms
+    for (const [roomKey, roomData] of visitedRooms.entries()) {
+        const [q, r] = roomKey.split(',').map(Number);
+        const pos = axialToPixel(q, r);
+        const isCurrent = (q === currentRoom.q && r === currentRoom.r);
+        
+        // Draw the hexagon for this room
+        drawHexagon(ctx, pos.x, pos.y, hexSize, isCurrent);
+        
+        // Draw connections to neighbors (doors)
+        for (const [wallIndex, neighbor] of roomData.neighbors.entries()) {
+            const direction = wallToDirection(wallIndex);
+            const doorX = pos.x + (hexSize * 0.7) * direction.q;
+            const doorY = pos.y + (hexSize * 0.7) * Math.sqrt(3) * (direction.r + direction.q/2);
+            
+            // Draw a small circle for the door
+            ctx.beginPath();
+            ctx.arc(doorX, doorY, 2, 0, Math.PI * 2);
+            
+            // Use different colors for different door states
+            if (roomData.doors.includes(wallIndex)) {
+                ctx.fillStyle = 'red'; // Normal door
+            } else {
+                ctx.fillStyle = 'yellow'; // Connection without door (shouldn't happen)
+                console.warn(`Room ${roomKey} has a connection on wall ${wallIndex} but no door`);
+            }
+            ctx.fill();
+            
+            // Add a small label for the wall index
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.font = '6px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${wallIndex}`, doorX, doorY - 5);
+        }
+        
+        // Draw room coordinates
+        ctx.fillStyle = isCurrent ? 'white' : 'rgba(255, 255, 255, 0.7)';
+        ctx.font = isCurrent ? 'bold 9px Arial' : '8px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${q},${r}`, pos.x, pos.y + 3);
     }
     
     // Add a legend to show direction
@@ -1374,6 +1772,25 @@ function drawMap() {
     ctx.fillText('S', centerX, canvas.height - 5);
     ctx.fillText('E', canvas.width - 15, centerY);
     ctx.fillText('W', 5, centerY);
+    
+    // Display current coordinates in the corner
+    ctx.fillStyle = 'white';
+    ctx.font = '10px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Current: (${currentRoom.q},${currentRoom.r})`, 5, canvas.height - 5);
+    
+    // Add wall index legend
+    ctx.textAlign = 'right';
+    ctx.fillText('Wall Index:', canvas.width - 5, canvas.height - 20);
+    for (let i = 0; i < 6; i++) {
+        ctx.fillText(`${i}: ${getWallDirectionName(i)}`, canvas.width - 5, canvas.height - 20 + (i+1) * 10);
+    }
+}
+
+// Function to get wall direction name based on index
+function getWallDirectionName(wallIndex) {
+    const names = ['East', 'Southeast', 'Southwest', 'West', 'Northwest', 'Northeast'];
+    return names[wallIndex];
 }
 
 // Function to draw a hexagon on the canvas
@@ -1394,13 +1811,21 @@ function drawHexagon(ctx, x, y, size, isCurrent) {
     // Set different styles for current room vs. other rooms
     if (isCurrent) {
         ctx.fillStyle = '#4169E1'; // Highlight current room
+        
+        // Add a highlight effect - glow
+        ctx.shadowColor = 'white';
+        ctx.shadowBlur = 10;
     } else {
         ctx.fillStyle = 'rgba(100, 100, 100, 0.5)';
+        ctx.shadowBlur = 0;
     }
     ctx.fill();
     
-    ctx.strokeStyle = 'white';
-    ctx.lineWidth = 1;
+    // Reset shadow for next drawings
+    ctx.shadowBlur = 0;
+    
+    ctx.strokeStyle = isCurrent ? 'white' : 'rgba(255, 255, 255, 0.5)';
+    ctx.lineWidth = isCurrent ? 2 : 1;
     ctx.stroke();
 }
 
