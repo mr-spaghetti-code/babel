@@ -454,3 +454,63 @@ footer .epigraph {
   background-color: var(--colour-border);
   z-index: -1;
 }
+
+/* 3D Experience Styles */
+#babylibrary3d {
+    width: 100%;
+    height: 100vh;
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 0;
+}
+
+#babylibrary3d canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+body.threejs-view nav {
+    background-color: rgba(0, 0, 0, 0.5);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+}
+
+body.threejs-view footer {
+    background-color: rgba(0, 0, 0, 0.5);
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+}
+
+.book-content pre.book-text {
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.book-header {
+    padding-bottom: 20px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #ccc;
+}
+
+.page-number {
+    font-size: 14px;
+    color: #666;
+    margin-top: 5px;
+}
+
+@media (max-width: 768px) {
+    #book-viewer {
+        width: 95%;
+        height: 90%;
+    }
+}
