@@ -178,6 +178,10 @@ const checkBounds = (
     await ctx.render("story");
   });
 
+  staticRouter.get("/3d", async (ctx) => {
+    await ctx.render("3d");
+  });
+
   staticRouter.get("/ref/:identifier", async (ctx) => {
     const { identifier } = ctx.params;
     const [roomOrUid, idWall, idShelf, idBook, idPage] = identifier.split(".");
