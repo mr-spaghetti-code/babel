@@ -2,14 +2,213 @@ import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
 import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 
 // Scene setup
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 scene.fog = new THREE.Fog(0x000000, 0, 50);
 
+// Add environment map for better reflections
+const envMapIntensity = 0.8;
+const envMapTexture = new THREE.TextureLoader().load('/3d-assets/floor/1K-woodparquet_18_ambientocclusion.jpg', function(texture) {
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    scene.environment = texture;
+});
+
 // Set a helper text element to inform users about the room
 document.getElementById('info').textContent = 'You are in a hexagonal room. Use WASD to move and mouse to look around.';
+
+// Wall dimensions
+const wallWidth = 5;
+const wallHeight = 4.5; // Increased from 3 to 4.5
+const wallThickness = 0.2;
+
+// Materials (defining the basic structure first, we'll add textures later)
+const wallMaterial = new THREE.MeshStandardMaterial({ 
+    color: 0xA67D3D, // Use a visible sandstone color instead of relying on textures
+    roughness: 0.7,
+    metalness: 0.3,
+    side: THREE.DoubleSide // Ensure walls are visible from both sides
+});
+
+// Hexagonal room configuration
+const roomRadius = 5; // Distance from center to each vertex
+const roomHeight = 4.5; // Increased from 3 to 4.5 (Height of room from floor to ceiling)
+
+// Door configuration
+const doorWidth = 1.8;
+const doorHeight = 2.5; // Increased from 2.2 to 2.5
+const doorColor = 0x4169E1; // Royal blue for doors
+
+// Define room mapping system using axial coordinates (q,r)
+// Where (0,0) is the center room
+const rooms = new Map();
+const currentRoom = { q: 0, r: 0 };
+let maxRing = 5; // Maximum ring number for exploration
+
+// Track visited rooms and their door placements
+const visitedRooms = new Map();
+// Format: Map<"q,r", { doors: [wallIndex1, wallIndex2], neighbors: Map<wallIndex, {q,r}> }>
+
+// Single room reference - we'll only have one physical room
+let singleRoom = null;
+
+// Portal effect
+const portalEffect = {
+    active: false,
+    duration: 0.5, // seconds
+    timer: 0,
+    startQ: 0,
+    startR: 0,
+    targetQ: 0,
+    targetR: 0,
+    exitWall: null,
+    entryWall: null
+};
+
+// Door material
+const doorMaterial = new THREE.MeshStandardMaterial({
+    color: doorColor,
+    roughness: 0.4,
+    metalness: 0.3
+});
+
+// Door frame material
+const doorFrameMaterial = new THREE.MeshStandardMaterial({
+    color: 0x8B0000, // Dark red for door frames
+    roughness: 0.5,
+    metalness: 0.2
+});
+
+// Portal effect material
+const portalMaterial = new THREE.MeshBasicMaterial({
+    color: 0xFFFFFF,
+    transparent: true,
+    opacity: 0
+});
+
+// Load floor textures
+const textureLoader = new THREE.TextureLoader();
+const floorTextures = {
+    baseColor: textureLoader.load('/3d-assets/floor/1K-woodparquet_18_basecolor.jpg'),
+    normal: textureLoader.load('/3d-assets/floor/1K-woodparquet_18_normal.jpg'),
+    roughness: textureLoader.load('/3d-assets/floor/1K-woodparquet_18_roughness.jpg'),
+    metallic: textureLoader.load('/3d-assets/floor/1K-woodparquet_18_metallic.jpg'),
+    ao: textureLoader.load('/3d-assets/floor/1K-woodparquet_18_ambientocclusion.jpg'),
+    height: textureLoader.load('/3d-assets/floor/1K-woodparquet_18_height.jpg')
+};
+
+// Now load wall textures after textureLoader is defined
+const wallTextures = {
+    baseColor: textureLoader.load('/3d-assets/walls/1K-ceramic_decorative_6-diffuse.jpg', 
+        texture => console.log('Wall baseColor texture loaded successfully'),
+        null,
+        error => console.error('Error loading wall baseColor texture:', error)),
+    normal: textureLoader.load('/3d-assets/walls/1K-ceramic_decorative_6-normal.jpg',
+        texture => console.log('Wall normal texture loaded successfully'),
+        null,
+        error => console.error('Error loading wall normal texture:', error)),
+    roughness: textureLoader.load('/3d-assets/walls/1K-ceramic_decorative_6-specular.jpg',
+        texture => console.log('Wall roughness texture loaded successfully'),
+        null,
+        error => console.error('Error loading wall roughness texture:', error)),
+    ao: textureLoader.load('/3d-assets/walls/1K-ceramic_decorative_6-ao.jpg',
+        texture => console.log('Wall AO texture loaded successfully'),
+        null,
+        error => console.error('Error loading wall AO texture:', error)),
+    displacement: textureLoader.load('/3d-assets/walls/1K-ceramic_decorative_6-displacement.jpg',
+        texture => console.log('Wall displacement texture loaded successfully'),
+        null,
+        error => console.error('Error loading wall displacement texture:', error))
+};
+
+// Set texture wrapping and repeat for all floor textures
+Object.values(floorTextures).forEach(texture => {
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(3, 3); // Adjust repeat as needed for proper scale
+});
+
+// Set texture wrapping and repeat for all wall textures
+Object.values(wallTextures).forEach(texture => {
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(1.5, 1); // Adjusted from 2, 1 to 1.5, 1 for better scale
+});
+
+// Now update the wall material with the loaded textures
+// Disable the normal map first, as it might be causing the black walls
+wallMaterial.map = wallTextures.baseColor;
+// wallMaterial.normalMap = wallTextures.normal; // Temporarily disable normal map
+wallMaterial.roughnessMap = wallTextures.roughness;
+wallMaterial.metalnessMap = null; // Ceramic has no metalness map
+wallMaterial.aoMap = wallTextures.ao;
+// wallMaterial.displacementMap = wallTextures.displacement; // Temporarily disable displacement
+wallMaterial.displacementScale = 0.0; // Set to 0 for now
+wallMaterial.metalness = 0.0; // Ceramic is not metallic
+wallMaterial.roughness = 0.7; // Ceramic is more rough
+wallMaterial.color = new THREE.Color(0xFFFFFF); // White base color for accurate texture display
+wallMaterial.shadowSide = THREE.FrontSide; // Makes sure shadows are received properly
+wallMaterial.side = THREE.DoubleSide; // Ensure walls are visible from both sides
+wallMaterial.envMap = scene.environment; // Use the environment map for reflections
+wallMaterial.envMapIntensity = 0.7; // Reduced from 1.0 to 0.7
+wallMaterial.transparent = false; // Make sure it's not transparent
+wallMaterial.wireframe = false; // Make sure wireframe is off
+wallMaterial.flatShading = false; // Use smooth shading
+wallMaterial.needsUpdate = true; // Ensure material updates
+
+// Log material properties to help debug
+console.log('Wall material configuration:', {
+    hasBaseColorMap: !!wallMaterial.map,
+    hasNormalMap: !!wallMaterial.normalMap,
+    hasRoughnessMap: !!wallMaterial.roughnessMap,
+    hasMetalnessMap: !!wallMaterial.metalnessMap,
+    hasAOMap: !!wallMaterial.aoMap,
+    hasDisplacementMap: !!wallMaterial.displacementMap,
+    metalness: wallMaterial.metalness,
+    roughness: wallMaterial.roughness,
+    colorValue: wallMaterial.color.getHexString()
+});
+
+// Additional materials for floor and ceiling
+const floorMaterial = new THREE.MeshStandardMaterial({
+    map: floorTextures.baseColor,
+    normalMap: floorTextures.normal,
+    roughnessMap: floorTextures.roughness,
+    metalnessMap: floorTextures.metallic,
+    aoMap: floorTextures.ao,
+    displacementMap: floorTextures.height,
+    displacementScale: 0.05, // Subtle displacement for realism
+    roughness: 0.8,
+    metalness: 0.1,
+    shadowSide: THREE.FrontSide, // Makes sure shadows are received properly
+    envMapIntensity: 0.5 // Reduce environment map intensity
+});
+
+const ceilingMaterial = new THREE.MeshStandardMaterial({
+    color: 0xC8B99D,  // Light beige color for the ceiling
+    roughness: 0.8,    // Slightly less rough than walls
+    metalness: 0.1,    // Very slight metallic quality
+    envMapIntensity: 0.2, // More subtle environment reflections
+    side: THREE.DoubleSide // Ensure it's visible from both sides
+});
+
+// Additional materials for text labels
+const textMaterial = new THREE.MeshStandardMaterial({
+    color: 0xFFFFFF,  // White color for text
+    roughness: 0.1,
+    metalness: 0.3
+});
+
+// Add door history tracking for consistency
+const doorTransitionHistory = {
+    lastExitWall: null,
+    lastEntryWall: null,
+    cameraRotation: null,
+    cameraForward: new THREE.Vector3()
+};
 
 // Camera setup
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -20,37 +219,177 @@ camera.position.z = 0; // Center of the room
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
+// Enable shadows in the renderer
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Soft shadows
+
+// Fix the black walls issue with proper renderer settings
+renderer.toneMapping = THREE.ReinhardToneMapping; // Change to Reinhard for better highlights
+renderer.toneMappingExposure = 0.2; // Set exposure to 0.2 as requested
+renderer.outputColorSpace = THREE.SRGBColorSpace; // Use proper color space for modern Three.js
+
 document.body.appendChild(renderer.domElement);
 
+// Create a procedural environment map for the metallic reflections
+console.log('Creating darker procedural environment map for gold reflections');
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+pmremGenerator.compileEquirectangularShader();
+
+// Create a high-contrast environment map with dramatic lighting
+const canvas = document.createElement('canvas');
+canvas.width = 512;
+canvas.height = 512;
+const context = canvas.getContext('2d');
+
+// Start with a dark gradient
+const gradient = context.createLinearGradient(0, 0, 0, 512);
+gradient.addColorStop(0, '#050510'); // Nearly black at top
+gradient.addColorStop(1, '#151208'); // Very dark at bottom
+context.fillStyle = gradient;
+context.fillRect(0, 0, 512, 512);
+
+// Add dramatic light source
+context.fillStyle = 'rgba(255, 200, 120, 0.3)';
+context.beginPath();
+context.arc(400, 100, 60, 0, Math.PI * 2);
+context.fill();
+
+// Add a second smaller light source
+context.fillStyle = 'rgba(200, 255, 255, 0.2)';
+context.beginPath();
+context.arc(100, 150, 40, 0, Math.PI * 2);
+context.fill();
+
+// Add small pinpoints of light to create sparkles in reflections
+context.fillStyle = 'rgba(255, 255, 255, 0.8)';
+for (let i = 0; i < 12; i++) {
+    const x = Math.random() * 512;
+    const y = Math.random() * 200; // Keep most in upper half
+    const size = 1 + Math.random() * 3;
+    context.beginPath();
+    context.arc(x, y, size, 0, Math.PI * 2);
+    context.fill();
+}
+
+const texture = new THREE.CanvasTexture(canvas);
+const envMap = pmremGenerator.fromEquirectangular(texture).texture;
+scene.environment = envMap;
+
+texture.dispose();
+pmremGenerator.dispose();
+
+// Optimize textures after renderer is created AND after floorTextures are defined
+Object.values(floorTextures).forEach(texture => {
+    // Add texture optimization
+    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    texture.generateMipmaps = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+});
+
+// Optimize wall textures too
+Object.values(wallTextures).forEach(texture => {
+    // Add texture optimization
+    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    texture.generateMipmaps = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+});
+
+// Add chandelier model loader
+const gltfLoader = new GLTFLoader();
+let chandelierModel = null;
+
+// Load the chandelier model once and reuse it
+gltfLoader.load('/3d-assets/chandelier/scene.gltf', (gltf) => {
+    console.log('Chandelier model loaded successfully');
+    chandelierModel = gltf.scene;
+    
+    // Scale the model to 50% smaller (0.25 instead of 0.5)
+    chandelierModel.scale.set(0.25, 0.25, 0.25);
+    
+    // Traverse the model to ensure textures are loaded and applied
+    chandelierModel.traverse((child) => {
+        if (child.isMesh) {
+            console.log('Found mesh in chandelier model:', child.name);
+            
+            // Enable shadows
+            child.castShadow = true;
+            child.receiveShadow = true;
+            
+            // If the material has textures, make sure they're loaded
+            if (child.material) {
+                if (child.material.map) {
+                    console.log('Texture found:', child.material.map.name);
+                    // Ensure texture is using the correct path
+                    child.material.map.needsUpdate = true;
+                }
+                
+                // Make sure the material properties are set for good rendering
+                child.material.needsUpdate = true;
+            }
+        }
+    });
+    
+    // Enable shadows for the whole model
+    chandelierModel.castShadow = true;
+    chandelierModel.receiveShadow = true;
+    
+    // If we already have a room, add the chandelier to it
+    // This is safe now because addChandelierToRoom is defined after this point
+    if (singleRoom) {
+        addChandelierToRoom(singleRoom);
+    }
+}, 
+(xhr) => {
+    console.log(`Chandelier loading: ${(xhr.loaded / xhr.total) * 100}% loaded`);
+},
+(error) => {
+    console.error('Error loading chandelier model:', error);
+});
+
 // Lighting
-const ambientLight = new THREE.AmbientLight(0x808080);
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.7); // Increased from original value to 0.7
 scene.add(ambientLight);
 
-const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-directionalLight.position.set(1, 1, 1);
+// Add directional light for better shadows and definition
+const directionalLight = new THREE.DirectionalLight(0xFFDCB8, 0.8); // Increased to 0.8
+directionalLight.position.set(1, 3, 1);
+directionalLight.castShadow = true;
+directionalLight.shadow.mapSize.width = 1024;
+directionalLight.shadow.mapSize.height = 1024;
+directionalLight.shadow.camera.left = -10;
+directionalLight.shadow.camera.right = 10;
+directionalLight.shadow.camera.top = 10;
+directionalLight.shadow.camera.bottom = -10;
+directionalLight.shadow.camera.near = 0.5;
+directionalLight.shadow.camera.far = 50;
 scene.add(directionalLight);
 
-// Add additional light sources
-const pointLight1 = new THREE.PointLight(0xffffff, 0.8, 20);
-pointLight1.position.set(0, 2, 0);
-scene.add(pointLight1);
+// Add more directional lights to ensure walls are properly lit from multiple angles
+const directionalLight2 = new THREE.DirectionalLight(0xFFDCB8, 0.8); // Increased to 0.8
+directionalLight2.position.set(-1, 2, -1);
+directionalLight2.castShadow = true;
+directionalLight2.shadow.mapSize.width = 1024;
+directionalLight2.shadow.mapSize.height = 1024;
+scene.add(directionalLight2);
 
-const pointLight2 = new THREE.PointLight(0xffffcc, 0.6, 15);
-pointLight2.position.set(3, 2, 0);
-scene.add(pointLight2);
+// Add the main chandelier light (warm and bright)
+const chandelierLight = new THREE.PointLight(0xFFD6AA, 1.0, 20); // Increased to 1.0 and range to 20
+chandelierLight.position.set(0, 3, 0); // Position near the ceiling
+chandelierLight.castShadow = true;
+chandelierLight.shadow.mapSize.width = 512;
+chandelierLight.shadow.mapSize.height = 512;
+scene.add(chandelierLight);
 
-// Add more lights to illuminate the hexagonal room evenly
-const pointLight3 = new THREE.PointLight(0xffffcc, 0.6, 15);
-pointLight3.position.set(-3, 2, 0);
-scene.add(pointLight3);
+// Add accent lights with increased intensity
+const accentLight1 = new THREE.PointLight(0xE09A70, 0.6, 10); // Increased to 0.6 and 10
+accentLight1.position.set(3, 1.5, 0);
+scene.add(accentLight1);
 
-const pointLight4 = new THREE.PointLight(0xffffcc, 0.6, 15);
-pointLight4.position.set(0, 2, 3);
-scene.add(pointLight4);
-
-const pointLight5 = new THREE.PointLight(0xffffcc, 0.6, 15);
-pointLight5.position.set(0, 2, -3);
-scene.add(pointLight5);
+const accentLight2 = new THREE.PointLight(0xE09A70, 0.6, 10); // Increased to 0.6 and 10
+accentLight2.position.set(-3, 1.5, 0);
+scene.add(accentLight2);
 
 // Controls
 const controls = new PointerLockControls(camera, document.body);
@@ -108,102 +447,6 @@ document.addEventListener('keyup', function(event) {
             break;
     }
 });
-
-// Wall dimensions
-const wallWidth = 5;
-const wallHeight = 3;
-const wallThickness = 0.2;
-
-// Materials
-const wallMaterial = new THREE.MeshStandardMaterial({ 
-    color: 0x8B4513,
-    roughness: 0.6,
-    metalness: 0.2
-});
-
-// Hexagonal room configuration
-const roomRadius = 5; // Distance from center to each vertex
-const roomHeight = 3; // Height of the room from floor to ceiling
-
-// Door configuration
-const doorWidth = 1.8;
-const doorHeight = 2.2;
-const doorColor = 0x4169E1; // Royal blue for doors
-
-// Define room mapping system using axial coordinates (q,r)
-// Where (0,0) is the center room
-const rooms = new Map();
-const currentRoom = { q: 0, r: 0 };
-let maxRing = 5; // Maximum ring number for exploration
-
-// Track visited rooms and their door placements
-const visitedRooms = new Map();
-// Format: Map<"q,r", { doors: [wallIndex1, wallIndex2], neighbors: Map<wallIndex, {q,r}> }>
-
-// Single room reference - we'll only have one physical room
-let singleRoom = null;
-
-// Portal effect
-const portalEffect = {
-    active: false,
-    duration: 0.5, // seconds
-    timer: 0,
-    startQ: 0,
-    startR: 0,
-    targetQ: 0,
-    targetR: 0,
-    exitWall: null,
-    entryWall: null
-};
-
-// Door material
-const doorMaterial = new THREE.MeshStandardMaterial({
-    color: doorColor,
-    roughness: 0.4,
-    metalness: 0.3
-});
-
-// Door frame material
-const doorFrameMaterial = new THREE.MeshStandardMaterial({
-    color: 0x8B0000, // Dark red for door frames
-    roughness: 0.5,
-    metalness: 0.2
-});
-
-// Portal effect material
-const portalMaterial = new THREE.MeshBasicMaterial({
-    color: 0xFFFFFF,
-    transparent: true,
-    opacity: 0
-});
-
-// Additional materials for floor and ceiling
-const floorMaterial = new THREE.MeshStandardMaterial({
-    color: 0x654321,  // Darker brown for the floor
-    roughness: 0.8,
-    metalness: 0.1
-});
-
-const ceilingMaterial = new THREE.MeshStandardMaterial({
-    color: 0xA18262,  // Lighter brown for the ceiling
-    roughness: 0.7,
-    metalness: 0.1
-});
-
-// Additional materials for text labels
-const textMaterial = new THREE.MeshStandardMaterial({
-    color: 0xFFFFFF,  // White color for text
-    roughness: 0.1,
-    metalness: 0.3
-});
-
-// Add door history tracking for consistency
-const doorTransitionHistory = {
-    lastExitWall: null,
-    lastEntryWall: null,
-    cameraRotation: null,
-    cameraForward: new THREE.Vector3()
-};
 
 // Function to calculate the ring number of a hexagonal cell at coordinates (q,r)
 function calculateRing(q, r) {
@@ -603,6 +846,224 @@ function validateDoorConnection(roomQ, roomR, wallIndex) {
     return { targetQ, targetR, oppositeWall };
 }
 
+// Function to add bookshelves to a room on walls without doors
+function addBookshelvesToRoom(room, doorWalls) {
+    // Define bookshelf dimensions
+    const shelfWidth = 3.6;  // Increased width from 2.4 to 3.6 to fit more books
+    const shelfHeight = 0.3; // Height of each shelf
+    const shelfDepth = 0.35; // Depth of the bookshelf
+    const shelfSpacing = 0.8; // Vertical spacing between shelves
+    const shelfOffsetFromWall = 0.05; // Small offset from wall
+    
+    // Create a bookshelf material with wood texture
+    const shelfMaterial = new THREE.MeshStandardMaterial({
+        color: 0x5c4033, // Brown wood color
+        roughness: 0.7,
+        metalness: 0.1,
+        bumpScale: 0.02
+    });
+    
+    // Create materials for the books with more varied colors
+    const bookMaterials = [
+        new THREE.MeshStandardMaterial({ color: 0x880000, roughness: 0.9 }), // Dark red
+        new THREE.MeshStandardMaterial({ color: 0x000088, roughness: 0.9 }), // Dark blue
+        new THREE.MeshStandardMaterial({ color: 0x008800, roughness: 0.9 }), // Dark green
+        new THREE.MeshStandardMaterial({ color: 0x884400, roughness: 0.9 }), // Brown
+        new THREE.MeshStandardMaterial({ color: 0x663399, roughness: 0.9 }), // Purple
+        new THREE.MeshStandardMaterial({ color: 0x006666, roughness: 0.9 }), // Teal
+        new THREE.MeshStandardMaterial({ color: 0x996633, roughness: 0.9 }), // Tan
+        new THREE.MeshStandardMaterial({ color: 0x990099, roughness: 0.9 })  // Magenta
+    ];
+    
+    // For each wall (0-5), check if it has a door
+    for (let wallIndex = 0; wallIndex < 6; wallIndex++) {
+        // Skip walls with doors
+        if (doorWalls.includes(wallIndex)) continue;
+        
+        // Get the wall points using the same function used for doors
+        const wallPoints = calculateWallPoints(wallIndex);
+        
+        // Calculate wall center using the same function used for door placement
+        const wallCenter = calculateWallCenter(wallPoints[0], wallPoints[1], wallPoints[2], wallPoints[3]);
+        
+        // Calculate wall normal
+        const normal = calculateNormal(wallPoints[0], wallPoints[1], wallPoints[2]);
+        
+        // Create a rotation to align the bookshelf with the wall normal
+        const wallAngle = Math.atan2(normal.x, normal.z);
+        
+        // Create bookshelf group for this wall
+        const wallBookshelfGroup = new THREE.Group();
+        wallBookshelfGroup.name = `bookshelf${wallIndex}`;
+        
+        // Add a subtle light to illuminate the bookshelf
+        const shelfLight = new THREE.PointLight(0xFFF0DD, 0.4, 3); // Warm, subtle light with short range
+        shelfLight.position.set(0, 0, shelfDepth/2); // Position slightly in front of the shelf
+        
+        // Add a slight random flicker effect to simulate candle-like lighting
+        shelfLight.userData.baseIntensity = 0.4;
+        shelfLight.userData.pulseSpeed = 0.5 + (Math.random() * 0.5); // Random speed
+        shelfLight.userData.pulseAmount = 0.05; // Small intensity variation
+        
+        // Create update function for shelf light flickering
+        shelfLight.userData.update = function(delta) {
+            // Add subtle flickering to the shelf light
+            const light = this;
+            light.intensity = light.userData.baseIntensity + 
+                Math.sin(Date.now() * 0.001 * light.userData.pulseSpeed) * light.userData.pulseAmount;
+        };
+        
+        wallBookshelfGroup.add(shelfLight);
+        
+        // Calculate wall width based on the distance between the two floor points
+        const wallWidth = new THREE.Vector3().subVectors(wallPoints[1], wallPoints[0]).length();
+        
+        // Add decorative trim to the bookshelf
+        const trimHeight = 0.1;
+        const trimWidth = shelfWidth + 0.2;
+        const trimDepth = shelfDepth + 0.05;
+        const trimGeometry = new THREE.BoxGeometry(trimWidth, trimHeight, trimDepth);
+        const trimMaterial = new THREE.MeshStandardMaterial({
+            color: 0x3d2817, // Darker wood color for trim
+            roughness: 0.7,
+            metalness: 0.2
+        });
+        
+        // Top trim
+        const topTrim = new THREE.Mesh(trimGeometry, trimMaterial);
+        topTrim.position.set(0, 0.7 + (5 * shelfSpacing) + (trimHeight/2), 0);
+        wallBookshelfGroup.add(topTrim);
+        
+        // Bottom trim
+        const bottomTrim = new THREE.Mesh(trimGeometry, trimMaterial);
+        bottomTrim.position.set(0, 0.7 - (trimHeight/2), 0);
+        wallBookshelfGroup.add(bottomTrim);
+        
+        // Add 5 bookshelves at different heights on the wall
+        for (let shelfLevel = 0; shelfLevel < 5; shelfLevel++) {
+            // Calculate y position for this shelf
+            const yPosition = 0.7 + (shelfLevel * shelfSpacing);
+            
+            // Create shelf (base) with rounded edges
+            const shelfGeometry = new THREE.BoxGeometry(shelfWidth, shelfHeight, shelfDepth);
+            const shelf = new THREE.Mesh(shelfGeometry, shelfMaterial);
+            
+            // Position the shelf relative to the wall center
+            shelf.position.set(0, yPosition - (wallCenter.y), 0);
+            
+            // Add the shelf to the group
+            wallBookshelfGroup.add(shelf);
+            
+            // Add books to this shelf
+            const bookWidth = 0.09; // Slightly thinner books to fit more (was 0.1)
+            const bookSpacing = 0.015; // Reduced spacing between books (was 0.02)
+            const maxBooksPerShelf = Math.floor((shelfWidth - 0.2) / (bookWidth + bookSpacing));
+            
+            // Ensure we have at least 32 books per shelf
+            const minBooks = 32;
+            const booksOnThisShelf = Math.max(minBooks, maxBooksPerShelf - Math.floor(Math.random() * 2));
+            
+            // Calculate start position for books (centered on shelf)
+            const bookStartX = -(shelfWidth / 2) + 0.1;
+            
+            // Create a group for this shelf's books
+            const shelfBooksGroup = new THREE.Group();
+            
+            // Place books on this shelf
+            for (let bookIndex = 0; bookIndex < booksOnThisShelf; bookIndex++) {
+                // Reduce the chance of gaps to ensure we have enough books (5% chance instead of 10%)
+                if (Math.random() < 0.05 && bookIndex > 0 && shelfBooksGroup.children.length >= minBooks) {
+                    continue; // Skip this position to create a gap, but only if we already have enough books
+                }
+                
+                // Create a book with random height and slight random tilt
+                const bookHeight = 0.5 + (Math.random() * 0.3); // Random height between 0.5 and 0.8
+                const bookDepth = shelfDepth - 0.1; // Slightly less deep than the shelf
+                
+                const bookGeometry = new THREE.BoxGeometry(bookWidth, bookHeight, bookDepth);
+                const randomMaterial = bookMaterials[Math.floor(Math.random() * bookMaterials.length)];
+                const book = new THREE.Mesh(bookGeometry, randomMaterial);
+                
+                // Position the book on the shelf with spacing
+                const bookX = bookStartX + (bookIndex * (bookWidth + bookSpacing));
+                const bookY = yPosition + (shelfHeight / 2) + (bookHeight / 2) - (wallCenter.y);
+                book.position.set(bookX, bookY, 0);
+                
+                // Add slight random rotation to some books (15% chance)
+                if (Math.random() < 0.15) {
+                    // Tilt the book slightly
+                    const tiltAngle = (Math.random() * 0.1) - 0.05; // Small random angle
+                    book.rotation.z = tiltAngle;
+                }
+                
+                // Add the book to the shelf group
+                shelfBooksGroup.add(book);
+                
+                // Occasionally add a small decorative object between books (3% chance instead of 5%)
+                // Only add decorations if we have enough books and we're not near the end
+                if (Math.random() < 0.03 && bookIndex < booksOnThisShelf - 3 && shelfBooksGroup.children.length >= minBooks) {
+                    // Create a small decorative object (like a bookend or small statue)
+                    const decorSize = 0.15;
+                    const decorGeometry = new THREE.SphereGeometry(decorSize/2, 8, 8);
+                    const decorMaterial = new THREE.MeshStandardMaterial({
+                        color: 0xD4AF37, // Gold color
+                        metalness: 0.7,
+                        roughness: 0.3
+                    });
+                    const decor = new THREE.Mesh(decorGeometry, decorMaterial);
+                    
+                    // Position the decoration
+                    const decorX = bookX + bookWidth/2 + bookSpacing + decorSize/2;
+                    const decorY = yPosition + (shelfHeight / 2) + (decorSize / 2) - (wallCenter.y);
+                    decor.position.set(decorX, decorY, 0);
+                    
+                    // Add to shelf group
+                    shelfBooksGroup.add(decor);
+                    
+                    // Skip the next position
+                    bookIndex++;
+                }
+            }
+            
+            // Add all books for this shelf to the bookshelf group
+            wallBookshelfGroup.add(shelfBooksGroup);
+        }
+        
+        // Position the entire bookshelf group at the wall center
+        wallBookshelfGroup.position.copy(wallCenter);
+        
+        // Move bookshelf slightly away from wall toward room center
+        // Calculate direction vector from wall center to room center
+        const roomCenter = new THREE.Vector3(0, wallCenter.y, 0);
+        const dirFromWallToCenter = new THREE.Vector3().subVectors(roomCenter, wallCenter).normalize();
+        
+        // Offset the bookshelf slightly from the wall
+        wallBookshelfGroup.position.add(dirFromWallToCenter.clone().multiplyScalar(shelfDepth/2 + shelfOffsetFromWall));
+        
+        // Rotate the bookshelf to face into the room
+        wallBookshelfGroup.rotation.y = wallAngle;
+        
+        // Add the bookshelf group to the room
+        room.add(wallBookshelfGroup);
+    }
+}
+
+// Helper function to calculate wall center point
+function calculateWallCenter(p1, p2, p3, p4) {
+    return new THREE.Vector3(
+        (p1.x + p2.x + p3.x + p4.x) / 4,
+        (p1.y + p2.y + p3.y + p4.y) / 4,
+        (p1.z + p2.z + p3.z + p4.z) / 4
+    );
+}
+
+// Helper function to calculate face normal from 3 points
+function calculateNormal(p1, p2, p3) {
+    const v1 = new THREE.Vector3().subVectors(p2, p1);
+    const v2 = new THREE.Vector3().subVectors(p3, p1);
+    return new THREE.Vector3().crossVectors(v1, v2).normalize();
+}
+
 // Function to create a hexagonal room with doors
 function createHexagonalRoom(q, r) {
     const room = new THREE.Group();
@@ -633,10 +1094,14 @@ function createHexagonalRoom(q, r) {
         bevelEnabled: false
     });
     
+    // Add UV2 coordinates for ambient occlusion map
+    floorGeometry.setAttribute('uv2', floorGeometry.getAttribute('uv'));
+    
     // Create floor mesh and rotate to lie flat on XZ plane
     const floor = new THREE.Mesh(floorGeometry, floorMaterial);
     floor.rotation.x = Math.PI / 2;
     floor.position.y = 0; // Position exactly at y=0 to be flush with walls
+    floor.receiveShadow = true; // Enable shadow receiving
     room.add(floor);
     
     // Create ceiling (same shape as floor but positioned at room height)
@@ -723,22 +1188,6 @@ function createHexagonalRoom(q, r) {
     coordsLabel.name = "roomCoordinates";
     room.add(coordsLabel);
     
-    // Helper function to calculate wall center point
-    function calculateWallCenter(p1, p2, p3, p4) {
-        return new THREE.Vector3(
-            (p1.x + p2.x + p3.x + p4.x) / 4,
-            (p1.y + p2.y + p3.y + p4.y) / 4,
-            (p1.z + p2.z + p3.z + p4.z) / 4
-        );
-    }
-    
-    // Helper function to calculate face normal from 3 points
-    function calculateNormal(p1, p2, p3) {
-        const v1 = new THREE.Vector3().subVectors(p2, p1);
-        const v2 = new THREE.Vector3().subVectors(p3, p1);
-        return new THREE.Vector3().crossVectors(v1, v2).normalize();
-    }
-    
     // Helper function to create a wall from 4 points (ensuring proper winding order)
     function createWall(points, index) {
         const wallGroup = new THREE.Group();
@@ -773,6 +1222,26 @@ function createHexagonalRoom(q, r) {
             
             // Add door to the wall group
             wallGroup.add(door);
+            
+            // Add a point light at the door position for better visibility
+            const doorLight = new THREE.PointLight(0xFFC773, 0.5, 4); // Warmer color for door light
+            doorLight.position.set(wallCenter.x, doorHeight / 2, wallCenter.z);
+            
+            // Add a subtle pulsing effect to door lights
+            doorLight.userData.baseIntensity = 0.5;
+            doorLight.userData.pulseSpeed = 0.8 + (Math.random() * 0.4); // Between 0.8 and 1.2
+            doorLight.userData.pulseAmount = 0.15; // Intensity variation
+            
+            // Create update function for door light pulsing
+            doorLight.userData.update = function(delta) {
+                // Add subtle pulsing to the door light
+                const light = this;
+                light.intensity = light.userData.baseIntensity + 
+                    Math.sin(Date.now() * 0.001 * light.userData.pulseSpeed) * light.userData.pulseAmount;
+            };
+            
+            wallGroup.add(doorLight);
+            wallGroup.userData.doorLight = doorLight;
             
             // Create partial walls (left and right of the door)
             // We'll create new points for these partial walls
@@ -816,6 +1285,20 @@ function createHexagonalRoom(q, r) {
                 points[3].x, points[3].y, points[3].z
             ]), 3));
             
+            // Add UV coordinates for texture mapping
+            const leftWallUvs = new Float32Array([
+                0, 0,
+                0.5, 0,
+                0.5, doorHeight/roomHeight,
+                
+                0, 0,
+                0.5, doorHeight/roomHeight,
+                0, 1
+            ]);
+            leftWallGeometry.setAttribute('uv', new THREE.BufferAttribute(leftWallUvs, 2));
+            // Add UV2 coordinates for ambient occlusion map
+            leftWallGeometry.setAttribute('uv2', new THREE.BufferAttribute(leftWallUvs, 2));
+            
             // Right section of wall
             const rightWallGeometry = new THREE.BufferGeometry();
             rightWallGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
@@ -827,6 +1310,20 @@ function createHexagonalRoom(q, r) {
                 points[2].x, points[2].y, points[2].z,
                 doorRightTop.x, doorRightTop.y, doorRightTop.z
             ]), 3));
+            
+            // Add UV coordinates for texture mapping
+            const rightWallUvs = new Float32Array([
+                0.5, 0,
+                1, 0,
+                1, 1,
+                
+                0.5, 0,
+                1, 1,
+                0.5, doorHeight/roomHeight
+            ]);
+            rightWallGeometry.setAttribute('uv', new THREE.BufferAttribute(rightWallUvs, 2));
+            // Add UV2 coordinates for ambient occlusion map
+            rightWallGeometry.setAttribute('uv2', new THREE.BufferAttribute(rightWallUvs, 2));
             
             // Top section of wall (above door)
             const topWallGeometry = new THREE.BufferGeometry();
@@ -840,10 +1337,32 @@ function createHexagonalRoom(q, r) {
                 wallTopCeiling.x, wallTopCeiling.y, wallTopCeiling.z
             ]), 3));
             
+            // Add UV coordinates for texture mapping
+            const topWallUvs = new Float32Array([
+                0, doorHeight/roomHeight,
+                1, doorHeight/roomHeight,
+                1, 1,
+                
+                0, doorHeight/roomHeight,
+                1, 1,
+                0, 1
+            ]);
+            topWallGeometry.setAttribute('uv', new THREE.BufferAttribute(topWallUvs, 2));
+            // Add UV2 coordinates for ambient occlusion map
+            topWallGeometry.setAttribute('uv2', new THREE.BufferAttribute(topWallUvs, 2));
+            
             // Create meshes for each wall section
             const leftWall = new THREE.Mesh(leftWallGeometry, wallMaterial);
+            leftWall.castShadow = true;
+            leftWall.receiveShadow = true;
+            
             const rightWall = new THREE.Mesh(rightWallGeometry, wallMaterial);
+            rightWall.castShadow = true;
+            rightWall.receiveShadow = true;
+            
             const topWall = new THREE.Mesh(topWallGeometry, wallMaterial);
+            topWall.castShadow = true;
+            topWall.receiveShadow = true;
             
             // Add wall sections to the wall group
             wallGroup.add(leftWall);
@@ -868,6 +1387,20 @@ function createHexagonalRoom(q, r) {
             // Set position attribute
             geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
             
+            // Add UV coordinates for texture mapping
+            const uvs = new Float32Array([
+                0, 0,
+                1, 0,
+                1, 1,
+                
+                0, 0,
+                1, 1,
+                0, 1
+            ]);
+            geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+            // Add UV2 coordinates for ambient occlusion
+            geometry.setAttribute('uv2', new THREE.BufferAttribute(uvs, 2));
+            
             // Calculate face normal to verify orientation
             const normal = calculateNormal(points[0], points[1], points[2]);
             
@@ -880,8 +1413,10 @@ function createHexagonalRoom(q, r) {
             // Check if the normal points toward the center (dot product > 0)
             const dotProduct = normal.dot(toCenter);
             
-            // Create the wall mesh
+            // Create the wall mesh with proper shadow settings
             const wall = new THREE.Mesh(geometry, wallMaterial);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
             wallGroup.add(wall);
             
             // Validate and log the wall orientation
@@ -901,6 +1436,28 @@ function createHexagonalRoom(q, r) {
                     points[3].x, points[3].y, points[3].z,
                     points[2].x, points[2].y, points[2].z
                 ]), 3));
+                
+                // Update UV coordinates for flipped vertices
+                geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([
+                    0, 0,
+                    1, 1,
+                    1, 0,
+                    
+                    0, 0,
+                    0, 1,
+                    1, 1
+                ]), 2));
+                
+                // Update UV2 coordinates for ambient occlusion
+                geometry.setAttribute('uv2', new THREE.BufferAttribute(new Float32Array([
+                    0, 0,
+                    1, 1,
+                    1, 0,
+                    
+                    0, 0,
+                    0, 1,
+                    1, 1
+                ]), 2));
             }
         }
         
@@ -963,7 +1520,75 @@ function createHexagonalRoom(q, r) {
         room.add(wall);
     }
     
+    // Add a chandelier to the room
+    addChandelierToRoom(room);
+    
+    // Add bookshelves to walls without doors
+    addBookshelvesToRoom(room, doorWalls);
+    
     return room;
+}
+
+// Function to add a chandelier to a room
+function addChandelierToRoom(room) {
+    if (!chandelierModel) {
+        console.log('Chandelier model not loaded yet');
+        return;
+    }
+    
+    // Clone the model so we can use it multiple times
+    const chandelier = chandelierModel.clone();
+    
+    // Position in center of the room near the ceiling
+    // We'll position it a bit below the ceiling to create nice light distribution
+    chandelier.position.set(0, roomHeight - 1.0, 0);
+    
+    // Add a point light to the chandelier to create a warm glow
+    const chandelierGlow = new THREE.PointLight(0xFFC773, 1.2, 8);
+    chandelierGlow.position.set(0, -0.5, 0); // Position slightly below the chandelier model
+    chandelierGlow.castShadow = true;
+    chandelierGlow.shadow.mapSize.width = 512;
+    chandelierGlow.shadow.mapSize.height = 512;
+    chandelier.add(chandelierGlow);
+    
+    // Add properties for the flickering effect
+    chandelierGlow.userData.baseIntensity = 1.2; // Same as the initial intensity above
+    chandelierGlow.userData.flickerSpeed = 0.05;
+    chandelierGlow.userData.flickerIntensity = 0.2;
+    
+    // Create the update function in a way that preserves 'this' context
+    chandelierGlow.userData.update = function(delta) {
+        // Add subtle random flickering to the light
+        const light = this;
+        light.intensity = light.userData.baseIntensity + 
+            Math.sin(Date.now() * light.userData.flickerSpeed) * light.userData.flickerIntensity * Math.random();
+    };
+    
+    // Make the chandelier materials emit light (glow)
+    chandelier.traverse(child => {
+        if (child.isMesh && child.material) {
+            // Clone the material to avoid modifying the original
+            if (Array.isArray(child.material)) {
+                child.material = child.material.map(mat => mat.clone());
+                child.material.forEach(mat => {
+                    mat.emissive = new THREE.Color(0xFFA726); // Warm orange glow
+                    mat.emissiveIntensity = 0.4; // Not too intense
+                });
+            } else {
+                child.material = child.material.clone();
+                child.material.emissive = new THREE.Color(0xFFA726);
+                child.material.emissiveIntensity = 0.4;
+            }
+        }
+    });
+    
+    // Add to the room
+    room.add(chandelier);
+    
+    // Store a reference to this chandelier light in the room's userData
+    room.userData.chandelierLight = chandelierGlow;
+    
+    return chandelier;
 }
 
 // Function to calculate room position in 3D space
@@ -1057,6 +1682,9 @@ function updateRoomAppearance(q, r) {
 
     // Completely recreate the room to ensure all doors are properly created
     recreateSingleRoom();
+    
+    // Since recreateSingleRoom creates a new room instance, we need to add the chandelier
+    // No need to add here as createHexagonalRoom will add the chandelier
     
     // Update user info
     document.getElementById('info').textContent = `You are in room (${q},${r}) on ring ${calculateRing(q, r)}. Use WASD to move and mouse to look around.`;
@@ -1309,6 +1937,54 @@ function animate() {
     // Update portal effect if active
     updatePortalEffect(delta);
     
+    // Update chandelier flickering if it exists
+    if (singleRoom && singleRoom.userData.chandelierLight) {
+        const light = singleRoom.userData.chandelierLight;
+        if (light && typeof light.userData.update === 'function') {
+            try {
+                // Call the update function with the light as 'this'
+                light.userData.update.call(light, delta);
+            } catch (e) {
+                // Handle any errors silently to prevent animation loop from breaking
+                console.log('Error updating chandelier light:', e);
+            }
+        }
+    }
+    
+    // Update door lights pulsing effect
+    if (singleRoom) {
+        // Find all door wall groups
+        singleRoom.traverse(object => {
+            if (object.userData && object.userData.doorLight && 
+                typeof object.userData.doorLight.userData.update === 'function') {
+                try {
+                    // Call the update function with the light as 'this'
+                    object.userData.doorLight.userData.update.call(object.userData.doorLight, delta);
+                } catch (e) {
+                    // Handle any errors silently
+                    console.log('Error updating door light:', e);
+                }
+            }
+        });
+        
+        // Update bookshelf lights
+        for (let wallIndex = 0; wallIndex < 6; wallIndex++) {
+            const bookshelf = singleRoom.getObjectByName(`bookshelf${wallIndex}`);
+            if (bookshelf) {
+                // Find the light in the bookshelf children
+                bookshelf.children.forEach(child => {
+                    if (child instanceof THREE.PointLight && child.userData.update) {
+                        try {
+                            child.userData.update.call(child, delta);
+                        } catch (e) {
+                            console.log('Error updating bookshelf light:', e);
+                        }
+                    }
+                });
+            }
+        }
+    }
+    
     const speed = 5.0;
     
     velocity.x = 0;
@@ -1437,6 +2113,7 @@ window.addEventListener('resize', function() {
 // Initialize the experience
 function init() {
     createRoomIndicator();
+    setupLightingGUI();
     animate();
 }
 
@@ -1845,5 +2522,363 @@ function updateRoomIndicator(q, r) {
     // If the map is visible, update it
     if (document.getElementById('map-container').style.display !== 'none') {
         drawMap();
+    }
+}
+
+// Add a container for lighting controls
+const lightingControls = {
+    ambientLightIntensity: 0.4, // Reduced from 0.6
+    directionalLightIntensity: 0.5, // Reduced from 0.6
+    directionalLight2Intensity: 0.3, // Reduced from 0.4
+    chandelierLightIntensity: 0.6, // Reduced from 0.7
+    chandelierLightColor: '#FFD6AA',
+    accentLightIntensity: 0.2, // Reduced from 0.3
+    wallMetalness: 0.7,
+    wallRoughness: 0.3,
+    exposure: 0.8, // Add exposure control
+    physicalCamera: false, // Add physical camera option
+    preset: 'Custom', // Current preset
+    resetToDefaults: function() {
+        // Reset to default values
+        this.ambientLightIntensity = 0.4;
+        this.directionalLightIntensity = 0.5;
+        this.directionalLight2Intensity = 0.3;
+        this.chandelierLightIntensity = 0.6;
+        this.chandelierLightColor = '#FFD6AA';
+        this.accentLightIntensity = 0.2;
+        this.wallMetalness = 0.7;
+        this.wallRoughness = 0.3;
+        this.exposure = 0.8;
+        this.physicalCamera = false;
+        this.preset = 'Default';
+        
+        // Apply all changes
+        updateLightingFromControls();
+        
+        // Save to localStorage
+        saveLightingSettings();
+    },
+    saveSettings: function() {
+        saveLightingSettings();
+        alert('Lighting settings saved!');
+    },
+    applyPreset: function(presetName) {
+        const preset = lightingPresets[presetName];
+        if (preset) {
+            // Apply all preset values
+            Object.assign(this, preset);
+            this.preset = presetName;
+            
+            // Update all controls with new values
+            updateLightingFromControls();
+            
+            // Refresh GUI if needed
+            if (this.guiControllers) {
+                for (const controller of Object.values(this.guiControllers)) {
+                    controller.updateDisplay();
+                }
+            }
+        }
+    }
+};
+
+// Define lighting presets
+const lightingPresets = {
+    'Default': {
+        ambientLightIntensity: 0.4,
+        directionalLightIntensity: 0.5,
+        directionalLight2Intensity: 0.3,
+        chandelierLightIntensity: 0.6,
+        chandelierLightColor: '#FFD6AA',
+        accentLightIntensity: 0.2,
+        wallMetalness: 0.7,
+        wallRoughness: 0.3,
+        exposure: 0.8,
+        physicalCamera: false
+    },
+    'Dramatic': {
+        ambientLightIntensity: 0.2,
+        directionalLightIntensity: 0.8,
+        directionalLight2Intensity: 0.1,
+        chandelierLightIntensity: 1.0,
+        chandelierLightColor: '#FFC773',
+        accentLightIntensity: 0.3,
+        wallMetalness: 0.9,
+        wallRoughness: 0.1,
+        exposure: 0.7,
+        physicalCamera: true
+    },
+    'Warm': {
+        ambientLightIntensity: 0.5,
+        directionalLightIntensity: 0.6,
+        directionalLight2Intensity: 0.4,
+        chandelierLightIntensity: 0.8,
+        chandelierLightColor: '#FFBB77',
+        accentLightIntensity: 0.4,
+        wallMetalness: 0.6,
+        wallRoughness: 0.3,
+        exposure: 0.9,
+        physicalCamera: false
+    },
+    'Cool': {
+        ambientLightIntensity: 0.3,
+        directionalLightIntensity: 0.5,
+        directionalLight2Intensity: 0.4,
+        chandelierLightIntensity: 0.6,
+        chandelierLightColor: '#AAD6FF',
+        accentLightIntensity: 0.2,
+        wallMetalness: 0.8,
+        wallRoughness: 0.2,
+        exposure: 0.75,
+        physicalCamera: true
+    },
+    'Dark': {
+        ambientLightIntensity: 0.1,
+        directionalLightIntensity: 0.3,
+        directionalLight2Intensity: 0.2,
+        chandelierLightIntensity: 0.5,
+        chandelierLightColor: '#FFD6AA',
+        accentLightIntensity: 0.1,
+        wallMetalness: 0.8,
+        wallRoughness: 0.4,
+        exposure: 0.6,
+        physicalCamera: false
+    }
+};
+
+// Function to save lighting settings to localStorage
+function saveLightingSettings() {
+    try {
+        const settings = {
+            ambientLightIntensity: lightingControls.ambientLightIntensity,
+            directionalLightIntensity: lightingControls.directionalLightIntensity,
+            directionalLight2Intensity: lightingControls.directionalLight2Intensity,
+            chandelierLightIntensity: lightingControls.chandelierLightIntensity,
+            chandelierLightColor: lightingControls.chandelierLightColor,
+            accentLightIntensity: lightingControls.accentLightIntensity,
+            wallMetalness: lightingControls.wallMetalness,
+            wallRoughness: lightingControls.wallRoughness,
+            exposure: lightingControls.exposure,
+            physicalCamera: lightingControls.physicalCamera,
+            preset: lightingControls.preset
+        };
+        localStorage.setItem('hexRoomLightingSettings', JSON.stringify(settings));
+        console.log('Lighting settings saved successfully');
+    } catch (e) {
+        console.error('Error saving lighting settings:', e);
+    }
+}
+
+// Function to load lighting settings from localStorage
+function loadLightingSettings() {
+    try {
+        const savedSettings = localStorage.getItem('hexRoomLightingSettings');
+        if (savedSettings) {
+            const settings = JSON.parse(savedSettings);
+            
+            // Update control values with saved settings
+            lightingControls.ambientLightIntensity = settings.ambientLightIntensity;
+            lightingControls.directionalLightIntensity = settings.directionalLightIntensity;
+            lightingControls.directionalLight2Intensity = settings.directionalLight2Intensity;
+            lightingControls.chandelierLightIntensity = settings.chandelierLightIntensity;
+            lightingControls.chandelierLightColor = settings.chandelierLightColor;
+            lightingControls.accentLightIntensity = settings.accentLightIntensity;
+            lightingControls.wallMetalness = settings.wallMetalness;
+            lightingControls.wallRoughness = settings.wallRoughness;
+            lightingControls.exposure = settings.exposure || 0.8; // Default if not in saved settings
+            lightingControls.physicalCamera = settings.physicalCamera || false;
+            lightingControls.preset = settings.preset || 'Custom';
+            
+            // Apply the loaded settings
+            updateLightingFromControls();
+            console.log('Lighting settings loaded successfully');
+        }
+    } catch (e) {
+        console.error('Error loading lighting settings:', e);
+    }
+}
+
+// Function to initialize the GUI
+function setupLightingGUI() {
+    const gui = new GUI({ title: 'Lighting Controls' });
+    gui.width = 300;
+    
+    // Load saved settings if available
+    loadLightingSettings();
+    
+    // Store controllers for later updating
+    lightingControls.guiControllers = {};
+    
+    // Add preset selector at the top
+    const presetOptions = Object.keys(lightingPresets);
+    presetOptions.push('Custom');
+    
+    lightingControls.guiControllers.preset = gui.add(lightingControls, 'preset', presetOptions)
+        .name('Lighting Preset')
+        .onChange(value => {
+            if (value !== 'Custom') {
+                lightingControls.applyPreset(value);
+            }
+        });
+    
+    // Add renderer settings
+    lightingControls.guiControllers.exposure = gui.add(lightingControls, 'exposure', 0.1, 2.0)
+        .name('Exposure')
+        .onChange(() => {
+            renderer.toneMappingExposure = lightingControls.exposure;
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+        
+    lightingControls.guiControllers.physicalCamera = gui.add(lightingControls, 'physicalCamera')
+        .name('Physical Camera')
+        .onChange(() => {
+            if (lightingControls.physicalCamera) {
+                camera.physicallyCorrectLights = true;
+            } else {
+                camera.physicallyCorrectLights = false;
+            }
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+    
+    // Folder for ambient lighting
+    const ambientFolder = gui.addFolder('Ambient Light');
+    lightingControls.guiControllers.ambientLightIntensity = ambientFolder.add(lightingControls, 'ambientLightIntensity', 0, 2)
+        .name('Intensity')
+        .onChange(() => {
+            ambientLight.intensity = lightingControls.ambientLightIntensity;
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+    
+    // Folder for directional lights
+    const directionalFolder = gui.addFolder('Directional Lights');
+    lightingControls.guiControllers.directionalLightIntensity = directionalFolder.add(lightingControls, 'directionalLightIntensity', 0, 2)
+        .name('Main Intensity')
+        .onChange(() => {
+            directionalLight.intensity = lightingControls.directionalLightIntensity;
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+    lightingControls.guiControllers.directionalLight2Intensity = directionalFolder.add(lightingControls, 'directionalLight2Intensity', 0, 2)
+        .name('Secondary Intensity')
+        .onChange(() => {
+            directionalLight2.intensity = lightingControls.directionalLight2Intensity;
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+    
+    // Folder for chandelier light
+    const chandelierFolder = gui.addFolder('Chandelier Light');
+    lightingControls.guiControllers.chandelierLightIntensity = chandelierFolder.add(lightingControls, 'chandelierLightIntensity', 0, 2)
+        .name('Intensity')
+        .onChange(() => {
+            chandelierLight.intensity = lightingControls.chandelierLightIntensity;
+            
+            // Also update the individual chandelier in the room if it exists
+            if (singleRoom && singleRoom.userData.chandelierLight) {
+                singleRoom.userData.chandelierLight.userData.baseIntensity = lightingControls.chandelierLightIntensity;
+            }
+            
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+    lightingControls.guiControllers.chandelierLightColor = chandelierFolder.addColor(lightingControls, 'chandelierLightColor')
+        .name('Color')
+        .onChange(() => {
+            chandelierLight.color.set(lightingControls.chandelierLightColor);
+            
+            // Also update the individual chandelier in the room if it exists
+            if (singleRoom && singleRoom.userData.chandelierLight) {
+                singleRoom.userData.chandelierLight.color.set(lightingControls.chandelierLightColor);
+            }
+            
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+    
+    // Folder for accent lights
+    const accentFolder = gui.addFolder('Accent Lights');
+    lightingControls.guiControllers.accentLightIntensity = accentFolder.add(lightingControls, 'accentLightIntensity', 0, 2)
+        .name('Intensity')
+        .onChange(() => {
+            accentLight1.intensity = lightingControls.accentLightIntensity;
+            accentLight2.intensity = lightingControls.accentLightIntensity;
+            
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+    
+    // Folder for material properties
+    const materialFolder = gui.addFolder('Wall Material');
+    lightingControls.guiControllers.wallMetalness = materialFolder.add(lightingControls, 'wallMetalness', 0, 1)
+        .name('Metalness')
+        .onChange(() => {
+            wallMaterial.metalness = lightingControls.wallMetalness;
+            wallMaterial.needsUpdate = true;
+            
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+    lightingControls.guiControllers.wallRoughness = materialFolder.add(lightingControls, 'wallRoughness', 0, 1)
+        .name('Roughness')
+        .onChange(() => {
+            wallMaterial.roughness = lightingControls.wallRoughness;
+            wallMaterial.needsUpdate = true;
+            
+            lightingControls.preset = 'Custom';
+            lightingControls.guiControllers.preset.updateDisplay();
+        });
+    
+    // Add buttons for saving and resetting
+    gui.add(lightingControls, 'saveSettings').name('Save Settings');
+    gui.add(lightingControls, 'resetToDefaults').name('Reset to Defaults');
+    
+    // Position the GUI in the top-right corner
+    gui.domElement.style.position = 'absolute';
+    gui.domElement.style.top = '10px';
+    gui.domElement.style.right = '10px';
+    
+    // Collapse folders by default
+    ambientFolder.close();
+    directionalFolder.close();
+    chandelierFolder.close();
+    accentFolder.close();
+    materialFolder.close();
+    
+    return gui;
+}
+
+// Function to apply all lighting changes from controls
+function updateLightingFromControls() {
+    // Apply all lighting values
+    ambientLight.intensity = lightingControls.ambientLightIntensity;
+    directionalLight.intensity = lightingControls.directionalLightIntensity;
+    directionalLight2.intensity = lightingControls.directionalLight2Intensity;
+    chandelierLight.intensity = lightingControls.chandelierLightIntensity;
+    chandelierLight.color.set(lightingControls.chandelierLightColor);
+    accentLight1.intensity = lightingControls.accentLightIntensity;
+    accentLight2.intensity = lightingControls.accentLightIntensity;
+    
+    // Apply material changes
+    wallMaterial.metalness = lightingControls.wallMetalness;
+    wallMaterial.roughness = lightingControls.wallRoughness;
+    wallMaterial.needsUpdate = true;
+    
+    // Apply renderer changes
+    renderer.toneMappingExposure = lightingControls.exposure;
+    
+    // Apply camera changes
+    if (lightingControls.physicalCamera) {
+        camera.physicallyCorrectLights = true;
+    } else {
+        camera.physicallyCorrectLights = false;
+    }
+    
+    // Update the individual chandelier in the room if it exists
+    if (singleRoom && singleRoom.userData.chandelierLight) {
+        singleRoom.userData.chandelierLight.userData.baseIntensity = lightingControls.chandelierLightIntensity;
+        singleRoom.userData.chandelierLight.color.set(lightingControls.chandelierLightColor);
     }
 } 
