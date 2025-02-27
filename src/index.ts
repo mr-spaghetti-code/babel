@@ -519,6 +519,10 @@ const checkBounds = (
     }
   });
 
+  dynamicRouter.get("/3d", async (ctx) => {
+    await ctx.render("3d");
+  });
+
   dynamicRouter.post("/open-bookmark", async (ctx) => {
     if (!(ctx.request as FormidableRequest).files?.bookmark) {
       ctx.status = 400;

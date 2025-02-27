@@ -1,0 +1,22 @@
+doctype html
+html(lang="en")
+    include includes/head.pug
+    +seo("3D Immersive Experience — Library of Babel")
+
+    link(rel="stylesheet", href="/css/3d.css")
+
+    script(type="importmap").
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.174.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.174.0/examples/jsm/"
+            }
+        }
+
+    body
+        button#back-button(onclick="window.location.href='/'") Back to Library
+        div#info Use WASD to move, mouse to look around
+
+        script(type="module").
+            import { init } from '/js/3d-experience.js';
+            init(); 
