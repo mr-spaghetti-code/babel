@@ -169,7 +169,7 @@ function createHexagonalRoom() {
     // Create floor mesh and rotate to lie flat on XZ plane
     const floor = new THREE.Mesh(floorGeometry, floorMaterial);
     floor.rotation.x = Math.PI / 2;
-    floor.position.y = -wallThickness; // Slightly below y=0 to account for thickness
+    floor.position.y = 0; // Position exactly at y=0 to be flush with walls
     room.add(floor);
     
     // Create ceiling (same shape as floor but positioned at room height)
@@ -224,109 +224,140 @@ function createHexagonalRoom() {
         return label;
     }
     
-    // Create an array to store walls
-    const walls = [];
+    // Create floor and ceiling vertices arrays that we'll use for walls
+    const floorVertices = [];
+    const ceilingVertices = [];
     
-    // Helper function to create and position a wall
-    function createWall(index) {
-        const nextIndex = (index + 1) % 6;
+    // Generate 3D vertices for floor and ceiling perimeter
+    for (let i = 0; i < 6; i++) {
+        const point = hexPoints[i];
+        floorVertices.push(new THREE.Vector3(point.x, 0, point.y)); // Floor vertices at y=0
+        ceilingVertices.push(new THREE.Vector3(point.x, roomHeight, point.y));
+    }
+    
+    // Helper function to calculate wall center point
+    function calculateWallCenter(p1, p2, p3, p4) {
+        return new THREE.Vector3(
+            (p1.x + p2.x + p3.x + p4.x) / 4,
+            (p1.y + p2.y + p3.y + p4.y) / 4,
+            (p1.z + p2.z + p3.z + p4.z) / 4
+        );
+    }
+    
+    // Helper function to calculate face normal from 3 points
+    function calculateNormal(p1, p2, p3) {
+        const v1 = new THREE.Vector3().subVectors(p2, p1);
+        const v2 = new THREE.Vector3().subVectors(p3, p1);
+        return new THREE.Vector3().crossVectors(v1, v2).normalize();
+    }
+    
+    // Helper function to create a wall from 4 points (ensuring proper winding order)
+    function createWall(points, index) {
+        // Create geometry from points
+        const geometry = new THREE.BufferGeometry();
         
-        // Get two adjacent vertices for the wall
-        const point1 = hexPoints[index];
-        const point2 = hexPoints[nextIndex];
+        // Define the vertices in the correct winding order for two triangles
+        const vertices = new Float32Array([
+            // First triangle
+            points[0].x, points[0].y, points[0].z,
+            points[1].x, points[1].y, points[1].z,
+            points[2].x, points[2].y, points[2].z,
+            // Second triangle
+            points[0].x, points[0].y, points[0].z,
+            points[2].x, points[2].y, points[2].z,
+            points[3].x, points[3].y, points[3].z
+        ]);
         
-        // Calculate wall width (distance between vertices)
-        const wallWidth = point1.distanceTo(point2);
+        // Set position attribute
+        geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
         
-        // Create wall geometry - width along X axis
-        const wallGeometry = new THREE.BoxGeometry(wallWidth, roomHeight, wallThickness);
-        const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+        // Calculate face normal to verify orientation
+        const normal = calculateNormal(points[0], points[1], points[2]);
         
-        // Position the wall between the two vertices at half the room height
-        const centerX = (point1.x + point2.x) / 2;
-        const centerZ = (point1.y + point2.y) / 2; // Note: y of Vector2 is z in 3D
-        wall.position.set(centerX, roomHeight / 2, centerZ);
+        // Calculate wall center
+        const wallCenter = calculateWallCenter(points[0], points[1], points[2], points[3]);
         
-        // Calculate the angle between the two points to align wall with hexagon edge
-        const dx = point2.x - point1.x;
-        const dz = point2.y - point1.y; // point.y in 2D = z in 3D
-        const angleRadians = Math.atan2(dz, dx);
+        // Vector from wall center to hexagon center (which is at 0,0,0)
+        const toCenter = new THREE.Vector3().subVectors(new THREE.Vector3(0, wallCenter.y, 0), wallCenter);
         
-        // Apply the rotation - this aligns the wall with the edge
-        wall.rotation.y = angleRadians;
+        // Check if the normal points toward the center (dot product > 0)
+        const dotProduct = normal.dot(toCenter);
         
-        // Create and add label to this wall
+        // Create the wall mesh
+        const wall = new THREE.Mesh(geometry, wallMaterial);
+        
+        // Validate and log the wall orientation
+        if (dotProduct > 0) {
+            console.log(`Wall ${wallLabels[index]}: Correctly facing inward (dot product: ${dotProduct.toFixed(2)})`);
+        } else {
+            console.log(`Wall ${wallLabels[index]}: WARNING! Facing outward (dot product: ${dotProduct.toFixed(2)})`);
+            // Flip the geometry by swapping vertices to reverse the faces
+            // This shouldn't happen with our improved algorithm, but added as a safeguard
+            geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+                // First triangle (reversed)
+                points[0].x, points[0].y, points[0].z,
+                points[2].x, points[2].y, points[2].z,
+                points[1].x, points[1].y, points[1].z,
+                // Second triangle (reversed)
+                points[0].x, points[0].y, points[0].z,
+                points[3].x, points[3].y, points[3].z,
+                points[2].x, points[2].y, points[2].z
+            ]), 3));
+        }
+        
+        // Create and add label to the wall
         const label = createTextLabel(wallLabels[index]);
         
-        // Position and orientation for the label
-        label.position.set(0, roomHeight / 2, -wallThickness/2 - 0.05);
-        label.rotation.y = Math.PI;
-        wall.add(label);
+        // Calculate wall normal vector (pointing inward)
+        const wallNormal = normal.clone();
+        // Make sure it points inward
+        if (dotProduct < 0) {
+            wallNormal.negate();
+        }
         
+        // Calculate the wall's face center
+        const wallFaceCenter = new THREE.Vector3(
+            wallCenter.x,
+            roomHeight / 2, // Center height of the wall
+            wallCenter.z
+        );
+        
+        // Position label slightly in front of the wall (inward)
+        // Small offset to prevent z-fighting
+        const labelOffset = 0.02;
+        label.position.copy(wallFaceCenter.clone().add(wallNormal.multiplyScalar(labelOffset)));
+        
+        // Make the label face the same direction as the wall normal (inward)
+        // We create a lookAt target point by extending the normal from the label position
+        const lookTarget = label.position.clone().add(wallNormal.clone().multiplyScalar(1));
+        label.lookAt(lookTarget);
+        
+        // Rotate the label to be right-side up
+        label.rotation.z = 0;
+        
+        wall.add(label);
         return wall;
     }
     
-    // Helper function to create a group of two walls and rotate them 180 degrees
-    function createRotatedWallGroup(index1, index2) {
-        // Create a group for the walls
-        const wallGroup = new THREE.Group();
+    // Create all six walls with consistent winding order
+    for (let i = 0; i < 6; i++) {
+        // Define points in counterclockwise order (when viewed from inside)
+        const floorPoint1 = floorVertices[i];
+        const floorPoint2 = floorVertices[(i+1) % 6];
+        const ceilingPoint2 = ceilingVertices[(i+1) % 6];
+        const ceilingPoint1 = ceilingVertices[i];
         
-        // Create the two walls
-        const wall1 = createWall(index1);
-        const wall2 = createWall(index2);
+        // Create wall with consistent winding order that ensures inward-facing normals
+        const wall = createWall([
+            floorPoint1,
+            floorPoint2,
+            ceilingPoint2,
+            ceilingPoint1
+        ], i);
         
-        // Store references to the walls
-        walls[index1] = wall1;
-        walls[index2] = wall2;
-        
-        // Add walls to the group
-        wallGroup.add(wall1);
-        wallGroup.add(wall2);
-        
-        // Calculate the center point between the walls to use as pivot
-        const centerPoint = new THREE.Vector3();
-        centerPoint.x = (wall1.position.x + wall2.position.x) / 2;
-        centerPoint.z = (wall1.position.z + wall2.position.z) / 2;
-        
-        // Set the group position to the center point
-        wallGroup.position.set(centerPoint.x, 0, centerPoint.z);
-        
-        // Move the individual walls relative to the group center
-        wall1.position.set(
-            wall1.position.x - centerPoint.x,
-            wall1.position.y,
-            wall1.position.z - centerPoint.z
-        );
-        
-        wall2.position.set(
-            wall2.position.x - centerPoint.x,
-            wall2.position.y,
-            wall2.position.z - centerPoint.z
-        );
-        
-        // Rotate the group 180 degrees around Y axis
-        wallGroup.rotation.y = Math.PI;
-        
-        return wallGroup;
+        // Add wall to the room
+        room.add(wall);
     }
-    
-    // Create and add wall C (index 2)
-    const wallC = createWall(2);
-    walls[2] = wallC;
-    room.add(wallC);
-    
-    // Create and add wall F (index 5)
-    const wallF = createWall(5);
-    walls[5] = wallF;
-    room.add(wallF);
-    
-    // Create rotated group for walls A and B (indices 0 and 1)
-    const wallsABGroup = createRotatedWallGroup(0, 1);
-    room.add(wallsABGroup);
-    
-    // Create rotated group for walls E and D (indices 4 and 3)
-    const wallsEDGroup = createRotatedWallGroup(4, 3);
-    room.add(wallsEDGroup);
     
     return room;
 }
