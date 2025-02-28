@@ -4,6 +4,12 @@ body {
     overflow: hidden;
     background-color: #000;
     font-family: monospace;
+    cursor: none; /* Hide cursor by default in 3D mode */
+}
+
+/* Show cursor when book viewer is open */
+body.cursor-visible {
+    cursor: auto !important;
 }
 
 #info {
@@ -37,4 +43,60 @@ body {
 
 canvas {
     display: block;
+}
+
+#mini-map-container {
+    position: fixed;
+    bottom: 20px;
+    left: 20px;
+    width: 150px;
+    height: 150px;
+    background-color: rgba(0, 0, 0, 0.7);
+    border-radius: 5px;
+    border: 2px solid #4169E1;
+    z-index: 1000;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+#book-tooltip {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(20px, 0);
+    background-color: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 14px;
+    z-index: 1000;
+    pointer-events: none;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    max-width: 250px;
+    text-align: left;
+    font-family: monospace;
+}
+
+#book-location {
+    white-space: pre-line;
+    display: block;
+}
+
+#book-tooltip.hidden {
+    display: none;
+}
+
+#crosshair-container {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 999;
+    pointer-events: none;
+}
+
+#crosshair {
+    color: white;
+    font-size: 24px;
+    opacity: 0.8;
 } 

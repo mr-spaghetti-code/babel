@@ -527,6 +527,44 @@ const checkBounds = (
     await ctx.render("3d");
   });
 
+  dynamicRouter.get("/api/random-identifier", async (ctx) => {
+    try {
+      const { binding } = await gmp_init();
+      const identifier = await getRandomIdentifier(binding);
+      await binding.reset();
+      
+      ctx.body = { identifier };
+    } catch (e: any) {
+      ctx.status = 500;
+      ctx.body = { error: e.message };
+    }
+  });
+
+  dynamicRouter.get("/api/book-content/:identifier", async (ctx) => {
+    try {
+      const identifier = ctx.params.identifier;
+      if (!identifier) {
+        ctx.status = 400;
+        ctx.body = { error: "Identifier is required" };
+        return;
+      }
+
+      const { binding } = await gmp_init();
+      const { N, C } = await initialiseNumbers(binding);
+      
+      // Check if we're requesting a whole book or just a page
+      const wholeBook = false; // We always want page content for the 3D viewer
+      
+      const content = await generateContent(binding, identifier, C, N, wholeBook);
+      await binding.reset();
+      
+      ctx.body = content;
+    } catch (e: any) {
+      ctx.status = 500;
+      ctx.body = { error: e.message };
+    }
+  });
+
   dynamicRouter.post("/open-bookmark", async (ctx) => {
     if (!(ctx.request as FormidableRequest).files?.bookmark) {
       ctx.status = 400;

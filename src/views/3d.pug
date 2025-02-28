@@ -16,6 +16,15 @@ html(lang="en")
     body
         button#back-button(onclick="window.location.href='/'") Back to Library
         div#info Use WASD to move, mouse to look around
+        
+        div#book-tooltip.hidden
+            span#book-location
+        
+        div#mini-map-container
+            canvas#mini-map-canvas(width="150" height="150")
+
+        div#crosshair-container
+            div#crosshair +
 
         script(type="module").
             import { init } from '/js/3d-experience.js';

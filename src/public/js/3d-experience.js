@@ -5,6 +5,20 @@ import { FontLoader } from 'three/addons/loaders/FontLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 
+// Import the babel integration functions
+import {
+    initBookViewer,
+    fetchRandomIdentifier,
+    fetchBookContent,
+    setRoomIdentifier,
+    getRoomIdentifier,
+    storeBookContent,
+    getBookContent,
+    openBookViewer,
+    closeBookViewer,
+    initializeRoomWithRandomIdentifier
+} from './babel-3d-integration.js';
+
 // Scene setup
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
@@ -17,8 +31,18 @@ const envMapTexture = new THREE.TextureLoader().load('/3d-assets/floor/1K-woodpa
     scene.environment = texture;
 });
 
+// Interactive objects for book interaction
+const interactiveObjects = [];
+const bookRaycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+// Add variables for book highlighting
+let currentlyHighlightedBook = null;
+let originalBookMaterial = null;
+let highlightedBookMaterial = null;
+
 // Set a helper text element to inform users about the room
-document.getElementById('info').textContent = 'You are in a hexagonal room. Use WASD to move and mouse to look around.';
+document.getElementById('info').textContent = 'Explore the hexagonal rooms. Hover over books to see their location. Click to read them.';
 
 // Wall dimensions
 const wallWidth = 5;
@@ -393,8 +417,20 @@ scene.add(accentLight2);
 
 // Controls
 const controls = new PointerLockControls(camera, document.body);
+// Make controls accessible globally for the book viewer
+window.controls = controls;
 
-document.addEventListener('click', function() {
+document.addEventListener('click', function(event) {
+    // Don't lock controls if clicking on the book viewer
+    const bookViewer = document.getElementById('book-viewer');
+    if (bookViewer && !bookViewer.classList.contains('hidden')) {
+        // If clicking inside the book viewer, don't lock controls
+        if (bookViewer.contains(event.target)) {
+            return;
+        }
+    }
+    
+    // Otherwise, lock controls if not already locked
     if (!controls.isLocked) {
         controls.lock();
     }
@@ -898,7 +934,7 @@ function addBookshelvesToRoom(room, doorWalls) {
         
         // Add a subtle light to illuminate the bookshelf
         const shelfLight = new THREE.PointLight(0xFFF0DD, 0.4, 3); // Warm, subtle light with short range
-        shelfLight.position.set(0, 0, shelfDepth/2); // Position slightly in front of the shelf
+        shelfLight.position.set(0, 1.5, 0);
         
         // Add a slight random flicker effect to simulate candle-like lighting
         shelfLight.userData.baseIntensity = 0.4;
@@ -939,12 +975,12 @@ function addBookshelvesToRoom(room, doorWalls) {
         bottomTrim.position.set(0, 0.7 - (trimHeight/2), 0);
         wallBookshelfGroup.add(bottomTrim);
         
-        // Add 5 bookshelves at different heights on the wall
-        for (let shelfLevel = 0; shelfLevel < 5; shelfLevel++) {
-            // Calculate y position for this shelf
-            const yPosition = 0.7 + (shelfLevel * shelfSpacing);
+        // Create 5 shelves (stacked vertically)
+        for (let shelfIndex = 0; shelfIndex < 5; shelfIndex++) {
+            // Calculate vertical position for this shelf
+            const yPosition = 0.7 + (shelfIndex * shelfSpacing);
             
-            // Create shelf (base) with rounded edges
+            // Create shelf geometry and mesh
             const shelfGeometry = new THREE.BoxGeometry(shelfWidth, shelfHeight, shelfDepth);
             const shelf = new THREE.Mesh(shelfGeometry, shelfMaterial);
             
@@ -995,6 +1031,17 @@ function addBookshelvesToRoom(room, doorWalls) {
                     const tiltAngle = (Math.random() * 0.1) - 0.05; // Small random angle
                     book.rotation.z = tiltAngle;
                 }
+                
+                // Add user data to the book for interaction
+                book.userData = {
+                    isBook: true,
+                    wallIndex: wallIndex,
+                    shelfIndex: shelfIndex,
+                    bookIndex: bookIndex
+                };
+                
+                // Make the book interactive
+                interactiveObjects.push(book);
                 
                 // Add the book to the shelf group
                 shelfBooksGroup.add(book);
@@ -1646,6 +1693,14 @@ function createSingleRoom() {
         }
     }
     
+    // Initialize the room with a random identifier if it doesn't have one yet
+    if (!getRoomIdentifier(currentRoom.q, currentRoom.r)) {
+        initializeRoomWithRandomIdentifier(currentRoom.q, currentRoom.r)
+            .then(identifier => {
+                console.log(`Room ${roomKey} initialized with identifier: ${identifier}`);
+            });
+    }
+    
     singleRoom = createHexagonalRoom(currentRoom.q, currentRoom.r);
     scene.add(singleRoom);
 }
@@ -1655,14 +1710,23 @@ function recreateSingleRoom() {
     // Remove old room
     if (singleRoom) {
         scene.remove(singleRoom);
+        singleRoom.traverse(function(object) {
+            if (object.geometry) object.geometry.dispose();
+            if (object.material) {
+                if (Array.isArray(object.material)) {
+                    object.material.forEach(material => material.dispose());
+                } else {
+                    object.material.dispose();
+                }
+            }
+        });
     }
     
-    // Create a new room
-    singleRoom = createHexagonalRoom(currentRoom.q, currentRoom.r);
-    scene.add(singleRoom);
+    // Clear interactive objects array
+    interactiveObjects.length = 0;
     
-    // Return the new room
-    return singleRoom;
+    // Create new room
+    createSingleRoom();
 }
 
 // Function to update the single room to represent coordinates (q,r)
@@ -1929,6 +1993,118 @@ const doorRaycaster = new THREE.Raycaster();
 const doorCheckDistance = 1.5; // Increased from 1.2 for easier door detection
 let nearDoor = null; // Track which door the player is near
 
+// Function to draw the mini-map with orientation indicator
+function drawMiniMap() {
+    const canvas = document.getElementById('mini-map-canvas');
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    const hexSize = 10; // Size of each hexagon
+    
+    // Clear the canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Function to convert axial coordinates to pixel coordinates
+    function axialToPixel(q, r) {
+        const x = centerX + hexSize * 1.5 * q;
+        const y = centerY + hexSize * Math.sqrt(3) * (r + q/2);
+        return { x, y };
+    }
+    
+    // Draw all visited rooms
+    for (const [roomKey, roomData] of visitedRooms.entries()) {
+        const [q, r] = roomKey.split(',').map(Number);
+        const pos = axialToPixel(q, r);
+        const isCurrent = (q === currentRoom.q && r === currentRoom.r);
+        
+        // Draw the hexagon for this room
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+            const angle = i * Math.PI / 3;
+            const hx = pos.x + hexSize * Math.cos(angle);
+            const hy = pos.y + hexSize * Math.sin(angle);
+            if (i === 0) {
+                ctx.moveTo(hx, hy);
+            } else {
+                ctx.lineTo(hx, hy);
+            }
+        }
+        ctx.closePath();
+        
+        // Set different styles for current room vs. other rooms
+        if (isCurrent) {
+            ctx.fillStyle = '#4169E1'; // Highlight current room
+        } else {
+            ctx.fillStyle = 'rgba(100, 100, 100, 0.5)';
+        }
+        ctx.fill();
+        
+        ctx.strokeStyle = isCurrent ? 'white' : 'rgba(255, 255, 255, 0.5)';
+        ctx.lineWidth = isCurrent ? 2 : 1;
+        ctx.stroke();
+        
+        // Draw doors for the current room
+        if (isCurrent) {
+            for (const wallIndex of roomData.doors) {
+                const direction = wallToDirection(wallIndex);
+                const doorX = pos.x + (hexSize * 0.7) * direction.q;
+                const doorY = pos.y + (hexSize * 0.7) * Math.sqrt(3) * (direction.r + direction.q/2);
+                
+                // Draw a small circle for the door
+                ctx.beginPath();
+                ctx.arc(doorX, doorY, 2, 0, Math.PI * 2);
+                ctx.fillStyle = 'red';
+                ctx.fill();
+            }
+            
+            // Draw player orientation indicator
+            if (camera) {
+                // Get camera direction
+                const camDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                
+                // Calculate the angle from the positive x-axis (east)
+                // Add PI to rotate 180 degrees to correct the orientation
+                const angle = Math.atan2(camDirection.z, camDirection.x);
+                
+                // Draw a direction indicator (triangle)
+                const indicatorLength = hexSize * 0.8;
+                const indicatorWidth = hexSize * 0.4;
+                
+                ctx.beginPath();
+                ctx.moveTo(
+                    pos.x + indicatorLength * Math.cos(angle),
+                    pos.y + indicatorLength * Math.sin(angle)
+                );
+                ctx.lineTo(
+                    pos.x + indicatorWidth * Math.cos(angle + Math.PI * 0.8),
+                    pos.y + indicatorWidth * Math.sin(angle + Math.PI * 0.8)
+                );
+                ctx.lineTo(
+                    pos.x + indicatorWidth * Math.cos(angle - Math.PI * 0.8),
+                    pos.y + indicatorWidth * Math.sin(angle - Math.PI * 0.8)
+                );
+                ctx.closePath();
+                ctx.fillStyle = 'yellow';
+                ctx.fill();
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+    }
+    
+    // Add a simple compass
+    ctx.fillStyle = 'white';
+    ctx.font = '8px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('N', centerX, 10);
+    ctx.fillText('S', centerX, canvas.height - 5);
+    ctx.fillText('E', canvas.width - 10, centerY);
+    ctx.fillText('W', 10, centerY);
+}
+
 function animate() {
     requestAnimationFrame(animate);
     
@@ -1936,6 +2112,9 @@ function animate() {
     
     // Update portal effect if active
     updatePortalEffect(delta);
+    
+    // Check for book highlighting
+    updateBookHighlighting();
     
     // Update chandelier flickering if it exists
     if (singleRoom && singleRoom.userData.chandelierLight) {
@@ -2100,6 +2279,9 @@ function animate() {
         }
     }
     
+    // Update mini-map with current orientation
+    drawMiniMap();
+    
     renderer.render(scene, camera);
 }
 
@@ -2112,6 +2294,17 @@ window.addEventListener('resize', function() {
 
 // Initialize the experience
 function init() {
+    // Initialize the book viewer
+    if (typeof initBookViewer === 'function') {
+        initBookViewer();
+    }
+    
+    // Add event listener for mouse clicks
+    window.addEventListener('click', onMouseClick, false);
+    
+    // Create crosshair overlay
+    createCrosshair();
+    
     createRoomIndicator();
     setupLightingGUI();
     animate();
@@ -2274,6 +2467,9 @@ function createRoomIndicator() {
     });
     
     updateRoomIndicator(currentRoom.q, currentRoom.r);
+    
+    // Initialize the mini-map
+    drawMiniMap();
 }
 
 // Function to draw a simple hexagonal map showing visited rooms
@@ -2880,5 +3076,168 @@ function updateLightingFromControls() {
     if (singleRoom && singleRoom.userData.chandelierLight) {
         singleRoom.userData.chandelierLight.userData.baseIntensity = lightingControls.chandelierLightIntensity;
         singleRoom.userData.chandelierLight.color.set(lightingControls.chandelierLightColor);
+    }
+}
+
+// Function to initialize the experience
+
+// Create a crosshair in the center of the screen
+function createCrosshair() {
+    const crosshairContainer = document.createElement('div');
+    crosshairContainer.id = 'crosshair-container';
+    crosshairContainer.style.position = 'absolute';
+    crosshairContainer.style.top = '50%';
+    crosshairContainer.style.left = '50%';
+    crosshairContainer.style.transform = 'translate(-50%, -50%)';
+    crosshairContainer.style.pointerEvents = 'none'; // Make sure it doesn't interfere with clicks
+    crosshairContainer.style.zIndex = '1000';
+    
+    const crosshair = document.createElement('div');
+    crosshair.id = 'crosshair';
+    crosshair.style.width = '20px';
+    crosshair.style.height = '20px';
+    crosshair.style.position = 'relative';
+    
+    // Create the crosshair lines
+    const horizontalLine = document.createElement('div');
+    horizontalLine.style.position = 'absolute';
+    horizontalLine.style.top = '50%';
+    horizontalLine.style.left = '0';
+    horizontalLine.style.width = '100%';
+    horizontalLine.style.height = '1px';
+    horizontalLine.style.backgroundColor = 'rgba(255, 255, 255, 0.7)';
+    horizontalLine.style.transform = 'translateY(-50%)';
+    
+    const verticalLine = document.createElement('div');
+    verticalLine.style.position = 'absolute';
+    verticalLine.style.top = '0';
+    verticalLine.style.left = '50%';
+    verticalLine.style.width = '1px';
+    verticalLine.style.height = '100%';
+    verticalLine.style.backgroundColor = 'rgba(255, 255, 255, 0.7)';
+    verticalLine.style.transform = 'translateX(-50%)';
+    
+    // Add a small circle in the center
+    const centerDot = document.createElement('div');
+    centerDot.style.position = 'absolute';
+    centerDot.style.top = '50%';
+    centerDot.style.left = '50%';
+    centerDot.style.width = '3px';
+    centerDot.style.height = '3px';
+    centerDot.style.borderRadius = '50%';
+    centerDot.style.backgroundColor = 'rgba(255, 255, 255, 0.9)';
+    centerDot.style.transform = 'translate(-50%, -50%)';
+    
+    crosshair.appendChild(horizontalLine);
+    crosshair.appendChild(verticalLine);
+    crosshair.appendChild(centerDot);
+    crosshairContainer.appendChild(crosshair);
+    
+    document.body.appendChild(crosshairContainer);
+}
+
+// Function to update book highlighting based on camera direction
+function updateBookHighlighting() {
+    // Create a raycaster from the camera center
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    
+    // Check for intersections with books
+    const intersects = raycaster.intersectObjects(interactiveObjects);
+    
+    // Get the tooltip element
+    const tooltip = document.getElementById('book-tooltip');
+    const tooltipContent = document.getElementById('book-location');
+    
+    // If we were highlighting a book previously, restore its original material
+    if (currentlyHighlightedBook && originalBookMaterial) {
+        currentlyHighlightedBook.material = originalBookMaterial;
+        currentlyHighlightedBook = null;
+        originalBookMaterial = null;
+        
+        // Hide the tooltip when not hovering over a book
+        tooltip.classList.add('hidden');
+    }
+    
+    // If we're pointing at a book, highlight it
+    if (intersects.length > 0) {
+        const object = intersects[0].object;
+        
+        // Check if it's a book
+        if (object.userData && object.userData.isBook) {
+            // Create highlighted material if it doesn't exist
+            if (!highlightedBookMaterial) {
+                // Create a glowing material for the highlighted book
+                highlightedBookMaterial = new THREE.MeshStandardMaterial({
+                    color: 0xffffcc,
+                    emissive: 0x444422,
+                    emissiveIntensity: 0.5,
+                    metalness: 0.3,
+                    roughness: 0.7
+                });
+            }
+            
+            // Store the original material and replace with highlighted material
+            currentlyHighlightedBook = object;
+            originalBookMaterial = object.material;
+            object.material = highlightedBookMaterial;
+            
+            // Get the room identifier
+            const roomIdentifier = getRoomIdentifier(currentRoom.q, currentRoom.r);
+            if (roomIdentifier) {
+                // Get the book location information
+                const [room] = roomIdentifier.split('.');
+                const wallIndex = object.userData.wallIndex;
+                const shelfIndex = object.userData.shelfIndex;
+                const bookIndex = object.userData.bookIndex;
+                
+                // Adjust wall, shelf, book based on the clicked book
+                // Convert from zero-based to one-based indexing
+                const adjustedWall = ((wallIndex % 6) + 1);
+                const adjustedShelf = ((shelfIndex % 5) + 1);
+                const adjustedBook = ((bookIndex % 32) + 1);
+                
+                // Get the wall direction name
+                const wallDirection = getWallDirectionName(wallIndex);
+                
+                // Update the tooltip content
+                tooltipContent.textContent = `Room: ${room}\nWall: ${adjustedWall} (${wallDirection})\nShelf: ${adjustedShelf}\nBook: ${adjustedBook}`;
+                
+                // Show the tooltip
+                tooltip.classList.remove('hidden');
+            }
+        }
+    }
+}
+
+// Handle mouse click for book interaction
+function onMouseClick(event) {
+    // Only process clicks when controls are locked (in 3D mode)
+    if (!controls.isLocked) return;
+    
+    // Use the center of the screen (where the crosshair is) instead of mouse position
+    // This creates a raycaster from the camera center (0,0) instead of mouse coordinates
+    bookRaycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    
+    // Calculate objects intersecting the picking ray
+    const intersects = bookRaycaster.intersectObjects(interactiveObjects);
+    
+    if (intersects.length > 0) {
+        const object = intersects[0].object;
+        
+        // Check if it's a book
+        if (object.userData && object.userData.isBook) {
+            // Hide the tooltip
+            document.getElementById('book-tooltip').classList.add('hidden');
+            
+            // Open the book viewer
+            openBookViewer(
+                currentRoom.q,
+                currentRoom.r,
+                object.userData.wallIndex,
+                object.userData.shelfIndex,
+                object.userData.bookIndex
+            );
+        }
     }
 } 
